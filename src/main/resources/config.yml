@@ -17,8 +17,12 @@ voicechat-admin:
     password: server-ip
   cooldown-ms: 1500
   confirm-window-ms: 7000
+  storage:
+    file: voicechat-admin.db
   auto-unmute:
     check-interval-ticks: 300
+  maintenance:
+    interval-ticks: 100
   listen:
     notify-group-members: true
   audit-webhook:
@@ -63,6 +67,8 @@ voicechat-admin:
     kick-usage: '&cUsage: /vckick <player>'
     move-usage: '&cUsage: /vcmove <player> <group>'
     history-usage: '&cUsage: /vchistory <player>'
+    case-usage: '&cUsage: /vccase <player>'
+    search-usage: '&cUsage: /vcsearch <text>'
     warn-usage: '&cUsage: /vcwarn <player> <reason>'
     notes-usage: '&cUsage: /vcnotes <player> [add|remove|list] [text/index]'
     purge-usage: '&cUsage: /vcpurgehistory <player>'
@@ -74,6 +80,9 @@ voicechat-admin:
     delete-usage: '&cUsage: /vcdelete <group>'
     pull-usage: '&cUsage: /vcpull <group>'
     disconnect-usage: '&cUsage: /vcdisconnect <player>'
+    follow-usage: '&cUsage: /vcfollow <player>'
+    forceleave-usage: '&cUsage: /vcforceleave <group>'
+    groupinfo-usage: '&cUsage: /vcgroupinfo <group>'
     listen-usage: '&cUsage: /vclisten <group>'
     spy-usage: '&cUsage: /vcspy <group>'
     player-not-found: '&cPlayer not found.'
@@ -86,6 +95,7 @@ voicechat-admin:
     confirm-unmuteall: '&eRepeat the command to remove all voice mutes.'
     confirm-deletegroup: '&eRepeat the command to delete %group%.'
     confirm-pull: '&eRepeat the command to pull all voice players into %group%.'
+    confirm-forceleave: '&eRepeat the command to remove all players from %group%.'
     mute-success: '&aMuted %player% in voice chat.'
     unmute-success: '&aUnmuted %player% in voice chat.'
     kick-success: '&aRemoved %player% from their voice chat group.'
@@ -107,6 +117,10 @@ voicechat-admin:
     delete-missing: '&eTemporary group %group% was not found.'
     pull-success: '&aMoved %count% players to %group%.'
     disconnect-success: '&aDisconnected %player% from voice chat.'
+    follow-success: '&aNow following %player% into %group%.'
+    unfollow-success: '&aFollow mode disabled.'
+    unfollow-empty: '&eYou are not currently following anyone.'
+    forceleave-success: '&aRemoved %count% players from %group%.'
     reload-success: '&aReloaded the voice admin plugin.'
     muted-you: '&cYou have been muted in voice chat.'
     unmuted-you: '&aYou have been unmuted in voice chat.'
@@ -131,6 +145,29 @@ voicechat-admin:
     notes-empty: '&7No voice notes stored.'
     notes-line: '&e#%index% &7| &8%time% &7| &b%actor% &7| %text%'
     export-header: '&6Voice export for &e%player%'
+    case-header: '&6Voice case for &e%player%'
+    case-summary: '&7Group: %group% &8| &7Muted: %muted% &8| &7Warnings: %warnings% &8| &7Notes: %notes%'
+    case-mute: '&7Mute: %remaining% &8| &7Moderator: %moderator% &8| &7Reason: %reason%'
+    case-warnings: '&6Latest warnings:'
+    case-warning-line: '&e- %time% &7| &b%actor% &7| %reason%'
+    case-notes: '&6Latest notes:'
+    case-note-line: '&e- %time% &7| &b%actor% &7| %text%'
+    case-history: '&6Recent actions:'
+    case-history-line: '&e- %id% &7| &8%time% &7| &f%action% &7| %details%'
+    search-header: '&6Voice search for &e%query%'
+    search-empty: '&7No matching notes or history entries found.'
+    search-note-line: '&e[Note] &b%player% &7| &8%time% &7| %text%'
+    search-history-line: '&e[History] &b%player% &7| &8%time% &7| &f%action% &7| %details%'
+    search-more: '&7Showing %shown% of %total% matches.'
+    locale-current: '&6Current locale: &e%locale%'
+    locale-available: '&7Available: %locales%'
+    locale-set: '&aLocale set to %locale%.'
+    locale-reset: '&aLocale preference reset to automatic.'
+    locale-invalid: '&cLocale %locale% is not available.'
+    groupinfo-header: '&6Voice group info for &e%group%'
+    groupinfo-stats: '&7Players: %players% &8| &7Locked: %locked% &8| &7Temporary: %temporary%'
+    groupinfo-monitoring: '&7Listeners: %listeners% &8| &7Spies: %spies%'
+    groupinfo-players: '&7Members: %players%'
     mutelist-header: '&6Active voice mutes:'
     mutelist-empty: '&7No active voice mutes.'
     mutelist-line: '&e- %player% &7| %remaining% &7| %moderator% &7| %reason%'
@@ -141,6 +178,12 @@ voicechat-admin:
     spy-success: '&aSpy mode enabled for %group%.'
     unspy-success: '&aSpy mode disabled.'
     unspy-empty: '&eYou are not currently in spy mode.'
+    spylist-header: '&6Active monitoring sessions:'
+    spylist-empty: '&7No active listen, spy, or follow sessions.'
+    spylist-listen-line: '&e[Listen] &b%player% &7-> %group%'
+    spylist-spy-line: '&e[Spy] &b%player% &7-> %group%'
+    spylist-follow-line: '&e[Follow] &b%player% &7-> %target%'
+    follow-self: '&eYou are already following yourself.'
     state-yes: '&aYes'
     state-no: '&cNo'
     no-group: '&7None'

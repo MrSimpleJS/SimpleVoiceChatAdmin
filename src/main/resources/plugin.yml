@@ -33,6 +33,15 @@ commands:
   vcmutelist:
     description: Show active voice chat mutes
     usage: /vcmutelist
+  vclocale:
+    description: Set or inspect your locale preference
+    usage: /vclocale [code]
+  vccase:
+    description: Show a full voice moderation case for a player
+    usage: /vccase <player>
+  vcsearch:
+    description: Search voice notes and history
+    usage: /vcsearch <text>
   vchistory:
     description: Show voice chat action history for a player
     usage: /vchistory <player>
@@ -75,6 +84,21 @@ commands:
   vcdisconnect:
     description: Force-disconnect a player from voice chat
     usage: /vcdisconnect <player>
+  vcfollow:
+    description: Follow a player's voice group
+    usage: /vcfollow <player>
+  vcunfollow:
+    description: Stop following a player's voice group
+    usage: /vcunfollow
+  vcforceleave:
+    description: Remove all players from a voice group
+    usage: /vcforceleave <group>
+  vcgroupinfo:
+    description: Show detailed info about a voice group
+    usage: /vcgroupinfo <group>
+  vcspylist:
+    description: Show active listen, spy, and follow sessions
+    usage: /vcspylist
   vcreload:
     description: Reload the voice admin plugin
     usage: /vcreload
@@ -110,5 +134,7 @@ permissions:
     default: op
   svca.spy:
     default: op
+  svca.locale:
+    default: true
   svca.bypasscooldown:
     default: op

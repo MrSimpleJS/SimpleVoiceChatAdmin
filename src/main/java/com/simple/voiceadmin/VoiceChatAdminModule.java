@@ -50,13 +50,16 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   private final Map<UUID, Deque<VoiceActionRecord>> actionHistory = new HashMap<>();
   private final Map<UUID, List<VoiceNote>> voiceNotes = new HashMap<>();
   private final Map<UUID, List<VoiceWarning>> voiceWarnings = new HashMap<>();
+  private final Map<UUID, String> localePreferences = new HashMap<>();
   private final Map<String, Long> actionCooldowns = new HashMap<>();
   private final Map<String, Long> pendingConfirmations = new HashMap<>();
   private final Set<String> lockedGroups = new HashSet<>();
   private final Set<String> temporaryGroups = new HashSet<>();
   private final Map<UUID, String> activeListenSessions = new HashMap<>();
   private final Map<UUID, String> activeSpySessions = new HashMap<>();
+  private final Map<UUID, UUID> activeFollowSessions = new HashMap<>();
   private final ThreadLocal<String> localeContext = new ThreadLocal<>();
+  private VoiceChatStorage storage;
   private BukkitVoicechatService service;
   private VoiceChatApiPlugin apiPlugin;
   private BroadcastVoicechatPlugin broadcastPlugin;
@@ -65,7 +68,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   private final Map<UUID, PermissionAttachment> mutePermissions = new HashMap<>();
   private boolean registered;
   private boolean apiRetryQueued;
-  private int autoUnmuteTaskId = -1;
+  private int maintenanceTaskId = -1;
 
   public VoiceChatAdminModule(VoiceChatAdminPlugin plugin) {
     this.plugin = plugin;
@@ -75,12 +78,13 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     if (!plugin.getConfig().getBoolean(BASE_PATH + ".enabled", true)) {
       return;
     }
+    initializeStorage();
     ensureServiceLoaded();
-    startAutoUnmuteTask();
+    startMaintenanceTask();
   }
 
   public void shutdown() {
-    stopAutoUnmuteTask();
+    stopMaintenanceTask();
     if (service != null) {
       unregisterPlugins();
     }
@@ -95,12 +99,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     actionHistory.clear();
     voiceNotes.clear();
     voiceWarnings.clear();
+    localePreferences.clear();
     actionCooldowns.clear();
     pendingConfirmations.clear();
     lockedGroups.clear();
     temporaryGroups.clear();
     activeListenSessions.clear();
     activeSpySessions.clear();
+    activeFollowSessions.clear();
+    storage = null;
   }
 
   @Override
@@ -131,6 +138,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       }
       if (name.equals("vcmutelist")) {
         return handleMuteListCommand(sender);
+      }
+      if (name.equals("vclocale")) {
+        return handleLocaleCommand(sender, args);
+      }
+      if (name.equals("vccase")) {
+        return handleCaseCommand(sender, args);
+      }
+      if (name.equals("vcsearch")) {
+        return handleSearchCommand(sender, args);
       }
       if (name.equals("vchistory")) {
         return handleHistoryCommand(sender, args);
@@ -174,6 +190,21 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       if (name.equals("vcdisconnect")) {
         return handleDisconnectCommand(sender, args);
       }
+      if (name.equals("vcfollow")) {
+        return handleFollowCommand(sender, args);
+      }
+      if (name.equals("vcunfollow")) {
+        return handleUnfollowCommand(sender);
+      }
+      if (name.equals("vcforceleave")) {
+        return handleForceLeaveCommand(sender, args);
+      }
+      if (name.equals("vcgroupinfo")) {
+        return handleGroupInfoCommand(sender, args);
+      }
+      if (name.equals("vcspylist")) {
+        return handleSpyListCommand(sender);
+      }
       if (name.equals("vcreload")) {
         return handleReloadCommand(sender);
       }
@@ -200,7 +231,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     String name = command.getName().toLowerCase(Locale.ROOT);
     if (name.equals("adminjoin") || name.equals("vcmove") || name.equals("vclock")
         || name.equals("vcunlock") || name.equals("vccreate") || name.equals("vcdelete")
-        || name.equals("vcpull")) {
+        || name.equals("vcpull") || name.equals("vcforceleave") || name.equals("vcgroupinfo")) {
       if ((name.equals("adminjoin") && args.length == 1) || (name.equals("vcmove") && args.length >= 2)) {
         String prefix = args[args.length - 1];
         return filterByPrefix(getKnownGroupNames(), prefix);
@@ -212,10 +243,17 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     if (name.equals("vcmute") || name.equals("vcunmute") || name.equals("vcinfo")
         || name.equals("vckick") || name.equals("vcmove") || name.equals("vchistory")
         || name.equals("vcwarn") || name.equals("vcnotes") || name.equals("vcexport")
-        || name.equals("vcmuteedit") || name.equals("vcdisconnect") || name.equals("vcpurgehistory")) {
+        || name.equals("vcmuteedit") || name.equals("vcdisconnect") || name.equals("vcpurgehistory")
+        || name.equals("vccase") || name.equals("vcfollow")) {
       if (args.length == 1) {
         return filterByPrefix(getKnownPlayerNames(), args[0]);
       }
+    }
+    if (name.equals("vclocale") && args.length == 1) {
+      List<String> locales = new ArrayList<>(plugin.getAvailableLocales());
+      locales.add("auto");
+      locales.sort(String.CASE_INSENSITIVE_ORDER);
+      return filterByPrefix(locales, args[0]);
     }
     if ((name.equals("vclisten") || name.equals("vcspy")) && args.length == 1) {
       return filterByPrefix(getKnownGroupNames(), args[0]);
@@ -291,6 +329,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     ensureMuteStore();
     muteStore.mute(target.getUniqueId(), muteInput.durationMs(), sender.getName(), muteInput.reason());
+    persistMute(target.getUniqueId());
     boolean permApplied = applyPermissionMute(target);
     boolean vcApplied = applyMuteState(target, true);
     boolean applied = permApplied || vcApplied;
@@ -331,6 +370,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     if (muteStore != null) {
       muteStore.unmute(target.getUniqueId());
+      persistMute(target.getUniqueId());
     }
     boolean permApplied = clearPermissionMute(target);
     boolean vcApplied = applyMuteState(target, false);
@@ -577,6 +617,163 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return true;
   }
 
+  private boolean handleLocaleCommand(CommandSender sender, String[] args) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(msg("messages.only-player", "&cPlayers only."));
+      return true;
+    }
+    if (args.length == 0) {
+      String current = resolveLocale(player);
+      sender.sendMessage(msg("messages.locale-current", "&6Current locale: &e%locale%").replace("%locale%", current));
+      sender.sendMessage(msg("messages.locale-available", "&7Available: %locales%")
+          .replace("%locales%", String.join(", ", new java.util.TreeSet<>(plugin.getAvailableLocales()))));
+      return true;
+    }
+    String input = args[0].trim();
+    if (input.equalsIgnoreCase("auto") || input.equalsIgnoreCase("reset")) {
+      localePreferences.remove(player.getUniqueId());
+      persistLocalePreference(player.getUniqueId(), null);
+      sender.sendMessage(msg("messages.locale-reset", "&aLocale preference reset to automatic."));
+      return true;
+    }
+    String locale = matchConfiguredLocale(input);
+    if (!plugin.hasLocale(locale)) {
+      sender.sendMessage(msg("messages.locale-invalid", "&cLocale %locale% is not available.").replace("%locale%", input));
+      return true;
+    }
+    localePreferences.put(player.getUniqueId(), locale);
+    persistLocalePreference(player.getUniqueId(), locale);
+    sender.sendMessage(msg("messages.locale-set", "&aLocale set to %locale%.").replace("%locale%", locale));
+    return true;
+  }
+
+  private boolean handleCaseCommand(CommandSender sender, String[] args) {
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.case-usage", "&cUsage: /vccase <player>"));
+      return true;
+    }
+    OfflinePlayer target = findOfflinePlayer(args[0]);
+    if (target == null) {
+      sender.sendMessage(msg("messages.player-not-found", "&cPlayer not found."));
+      return true;
+    }
+    VoicechatConnection connection = getConnection(target);
+    String groupName = connection != null && connection.getGroup() != null
+        ? safeGroupName(connection.getGroup())
+        : msg("messages.no-group", "&7None");
+    VoiceChatMuteStore.MuteEntry muteEntry = muteStore == null ? null : muteStore.getEntry(target.getUniqueId());
+    List<VoiceWarning> warnings = voiceWarnings.getOrDefault(target.getUniqueId(), Collections.emptyList());
+    List<VoiceNote> notes = voiceNotes.getOrDefault(target.getUniqueId(), Collections.emptyList());
+    Deque<VoiceActionRecord> history = actionHistory.getOrDefault(target.getUniqueId(), new ArrayDeque<>());
+
+    sender.sendMessage(msg("messages.case-header", "&6Voice case for &e%player%")
+        .replace("%player%", playerName(target, args[0])));
+    sender.sendMessage(msg("messages.case-summary", "&7Group: %group% &8| &7Muted: %muted% &8| &7Warnings: %warnings% &8| &7Notes: %notes%")
+        .replace("%group%", groupName)
+        .replace("%muted%", muteEntry == null ? msg("messages.state-no", "&cNo") : msg("messages.state-yes", "&aYes"))
+        .replace("%warnings%", String.valueOf(warnings.size()))
+        .replace("%notes%", String.valueOf(notes.size())));
+    if (muteEntry != null) {
+      sender.sendMessage(msg("messages.case-mute", "&7Mute: %remaining% &8| &7Moderator: %moderator% &8| &7Reason: %reason%")
+          .replace("%remaining%", formatRemainingMute(muteStore.getRemainingMs(target.getUniqueId())))
+          .replace("%moderator%", muteEntry.getModerator().isBlank() ? msg("messages.unknown-value", "&7Unknown") : muteEntry.getModerator())
+          .replace("%reason%", muteEntry.getReason().isBlank() ? msg("messages.no-reason", "&7No reason") : muteEntry.getReason()));
+    }
+    if (!warnings.isEmpty()) {
+      sender.sendMessage(msg("messages.case-warnings", "&6Latest warnings:"));
+      for (int i = Math.max(0, warnings.size() - 3); i < warnings.size(); i++) {
+        VoiceWarning warning = warnings.get(i);
+        sender.sendMessage(msg("messages.case-warning-line", "&e- %time% &7| &b%actor% &7| %reason%")
+            .replace("%time%", formatTimestamp(warning.createdAtMs()))
+            .replace("%actor%", warning.actor())
+            .replace("%reason%", warning.reason()));
+      }
+    }
+    if (!notes.isEmpty()) {
+      sender.sendMessage(msg("messages.case-notes", "&6Latest notes:"));
+      for (int i = Math.max(0, notes.size() - 3); i < notes.size(); i++) {
+        VoiceNote note = notes.get(i);
+        sender.sendMessage(msg("messages.case-note-line", "&e- %time% &7| &b%actor% &7| %text%")
+            .replace("%time%", formatTimestamp(note.createdAtMs()))
+            .replace("%actor%", note.actor())
+            .replace("%text%", note.text()));
+      }
+    }
+    if (!history.isEmpty()) {
+      sender.sendMessage(msg("messages.case-history", "&6Recent actions:"));
+      int shown = 0;
+      for (VoiceActionRecord record : history) {
+        sender.sendMessage(msg("messages.case-history-line", "&e- %id% &7| &8%time% &7| &f%action% &7| %details%")
+            .replace("%id%", record.id())
+            .replace("%time%", formatTimestamp(record.createdAtMs()))
+            .replace("%action%", record.action())
+            .replace("%details%", record.details().isBlank() ? "-" : record.details()));
+        shown++;
+        if (shown >= 5) {
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
+  private boolean handleSearchCommand(CommandSender sender, String[] args) {
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.search-usage", "&cUsage: /vcsearch <text>"));
+      return true;
+    }
+    String query = String.join(" ", args).trim();
+    String needle = query.toLowerCase(Locale.ROOT);
+    List<String> results = new ArrayList<>();
+    for (Map.Entry<UUID, List<VoiceNote>> entry : voiceNotes.entrySet()) {
+      OfflinePlayer target = Bukkit.getOfflinePlayer(entry.getKey());
+      for (VoiceNote note : entry.getValue()) {
+        if (note.text().toLowerCase(Locale.ROOT).contains(needle)) {
+          results.add(msg("messages.search-note-line", "&e[Note] &b%player% &7| &8%time% &7| %text%")
+              .replace("%player%", playerName(target, entry.getKey().toString()))
+              .replace("%time%", formatTimestamp(note.createdAtMs()))
+              .replace("%text%", note.text()));
+        }
+      }
+    }
+    for (Map.Entry<UUID, Deque<VoiceActionRecord>> entry : actionHistory.entrySet()) {
+      OfflinePlayer target = Bukkit.getOfflinePlayer(entry.getKey());
+      for (VoiceActionRecord record : entry.getValue()) {
+        String haystack = (record.action() + " " + record.actor() + " " + record.details()).toLowerCase(Locale.ROOT);
+        if (haystack.contains(needle)) {
+          results.add(msg("messages.search-history-line", "&e[History] &b%player% &7| &8%time% &7| &f%action% &7| %details%")
+              .replace("%player%", playerName(target, entry.getKey().toString()))
+              .replace("%time%", formatTimestamp(record.createdAtMs()))
+              .replace("%action%", record.action())
+              .replace("%details%", record.details().isBlank() ? "-" : record.details()));
+        }
+      }
+    }
+    sender.sendMessage(msg("messages.search-header", "&6Voice search for &e%query%").replace("%query%", query));
+    if (results.isEmpty()) {
+      sender.sendMessage(msg("messages.search-empty", "&7No matching notes or history entries found."));
+      return true;
+    }
+    int limit = Math.min(results.size(), 15);
+    for (int i = 0; i < limit; i++) {
+      sender.sendMessage(results.get(i));
+    }
+    if (results.size() > limit) {
+      sender.sendMessage(msg("messages.search-more", "&7Showing %shown% of %total% matches.")
+          .replace("%shown%", String.valueOf(limit))
+          .replace("%total%", String.valueOf(results.size())));
+    }
+    return true;
+  }
+
   private boolean handleHistoryCommand(CommandSender sender, String[] args) {
     if (!sender.hasPermission(getInfoPermission())) {
       sender.sendMessage(msg("messages.no-permission", "&cKeine Rechte."));
@@ -628,10 +825,12 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return true;
     }
     String reason = String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length)).trim();
-    VoiceWarning warning = new VoiceWarning(System.currentTimeMillis(), sender.getName(), reason);
-    voiceWarnings.computeIfAbsent(target.getUniqueId(), key -> new ArrayList<>()).add(warning);
-    voiceNotes.computeIfAbsent(target.getUniqueId(), key -> new ArrayList<>())
-        .add(new VoiceNote(System.currentTimeMillis(), sender.getName(), "[Warn] " + reason));
+      VoiceWarning warning = new VoiceWarning(System.currentTimeMillis(), sender.getName(), reason);
+      voiceWarnings.computeIfAbsent(target.getUniqueId(), key -> new ArrayList<>()).add(warning);
+      voiceNotes.computeIfAbsent(target.getUniqueId(), key -> new ArrayList<>())
+          .add(new VoiceNote(System.currentTimeMillis(), sender.getName(), "[Warn] " + reason));
+      persistWarning(target.getUniqueId(), warning);
+      persistNotes(target.getUniqueId());
     sender.sendMessage(msg("messages.warn-success", "&aVoice-Warnung fuer %player% gespeichert.")
         .replace("%player%", playerName(target, args[0])));
     String logId = recordAction(target.getUniqueId(), "warn", sender.getName(), "reason=" + reason);
@@ -678,7 +877,8 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         return true;
       }
       String text = String.join(" ", java.util.Arrays.copyOfRange(args, 2, args.length)).trim();
-      notes.add(new VoiceNote(System.currentTimeMillis(), sender.getName(), text));
+        notes.add(new VoiceNote(System.currentTimeMillis(), sender.getName(), text));
+        persistNotes(target.getUniqueId());
       sender.sendMessage(msg("messages.notes-add-success", "&aNotiz fuer %player% gespeichert.")
           .replace("%player%", playerName(target, args[0])));
       String logId = recordAction(target.getUniqueId(), "note", sender.getName(), "note=" + text);
@@ -696,7 +896,8 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
           sender.sendMessage(msg("messages.notes-invalid-index", "&cUngueltiger Notiz-Index."));
           return true;
         }
-        VoiceNote removed = notes.remove(index);
+          VoiceNote removed = notes.remove(index);
+          persistNotes(target.getUniqueId());
         sender.sendMessage(msg("messages.notes-remove-success", "&aNotiz fuer %player% entfernt.")
             .replace("%player%", playerName(target, args[0])));
         String logId = recordAction(target.getUniqueId(), "note-remove", sender.getName(), "note=" + removed.text());
@@ -732,6 +933,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return true;
     }
     actionHistory.remove(target.getUniqueId());
+    if (storage != null) {
+      storage.deleteHistory(target.getUniqueId());
+    }
     sender.sendMessage(msg("messages.purge-success", "&aVoiceChat-History fuer %player% geloescht.")
         .replace("%player%", playerName(target, args[0])));
     String logId = recordAction(target.getUniqueId(), "purge-history", sender.getName(), "");
@@ -814,6 +1018,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         ? String.join(" ", java.util.Arrays.copyOfRange(args, 2, args.length)).trim()
         : entry.getReason();
     muteStore.mute(target.getUniqueId(), newDurationMs, sender.getName(), newReason);
+    persistMute(target.getUniqueId());
     applyMuteState(target, true);
     applyPermissionMute(target);
     sender.sendMessage(msg("messages.muteedit-success", "&aMute von %player% wurde aktualisiert.")
@@ -856,6 +1061,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         continue;
       }
       muteStore.mute(online.getUniqueId(), muteInput.durationMs(), sender.getName(), muteInput.reason());
+      persistMute(online.getUniqueId());
       applyPermissionMute(online);
       applyMuteState(online, true);
       count++;
@@ -886,6 +1092,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     for (UUID uuid : new ArrayList<>(muteStore.getActiveMutes().keySet())) {
       OfflinePlayer target = Bukkit.getOfflinePlayer(uuid);
       muteStore.unmute(uuid);
+      persistMute(uuid);
       clearPermissionMute(target);
       applyMuteState(target, false);
       count++;
@@ -918,6 +1125,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     } else {
       lockedGroups.remove(groupName.toLowerCase(Locale.ROOT));
     }
+    persistGroupState(groupName);
     sender.sendMessage(msg(lock ? "messages.lock-success" : "messages.unlock-success",
         lock ? "&aGruppe %group% wurde gesperrt." : "&aGruppe %group% wurde entsperrt.")
         .replace("%group%", groupName));
@@ -946,6 +1154,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return true;
     }
     temporaryGroups.add(groupName);
+    persistGroupState(groupName);
     sender.sendMessage(msg("messages.create-success", "&aTemporare Gruppe %group% erstellt.")
         .replace("%group%", groupName));
     sendAuditLog(recordAction(null, "create-group", sender.getName(), "group=" + groupName),
@@ -980,6 +1189,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     temporaryGroups.remove(storedName);
     lockedGroups.remove(storedName.toLowerCase(Locale.ROOT));
+    persistGroupState(storedName);
     for (Player online : Bukkit.getOnlinePlayers()) {
       VoicechatConnection connection = getConnection(online);
       if (connection == null || connection.getGroup() == null) {
@@ -1076,6 +1286,169 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     String logId = recordAction(target.getUniqueId(), "disconnect", sender.getName(), "");
     sendAuditLog(logId, "disconnect", sender, target, "");
+    return true;
+  }
+
+  private boolean handleFollowCommand(CommandSender sender, String[] args) {
+    ensureServiceLoaded();
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(msg("messages.only-player", "&cPlayers only."));
+      return true;
+    }
+    if (!sender.hasPermission(getListenPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.follow-usage", "&cUsage: /vcfollow <player>"));
+      return true;
+    }
+    if (getVoicechatApiOrRetry(sender) == null) {
+      return true;
+    }
+    OfflinePlayer target = findOfflinePlayer(args[0]);
+    if (target == null) {
+      sender.sendMessage(msg("messages.player-not-found", "&cPlayer not found."));
+      return true;
+    }
+    if (player.getUniqueId().equals(target.getUniqueId())) {
+      sender.sendMessage(msg("messages.follow-self", "&eYou are already following yourself."));
+      return true;
+    }
+    VoicechatConnection targetConnection = getConnection(target);
+    if (targetConnection == null || targetConnection.getGroup() == null) {
+      sender.sendMessage(msg("messages.player-not-connected", "&ePlayer is not connected to voice chat."));
+      return true;
+    }
+    VoicechatConnection followerConnection = getConnection(player);
+    if (followerConnection == null) {
+      sender.sendMessage(msg("messages.connection-error", "&cVoice chat connection not found."));
+      return true;
+    }
+    followerConnection.setGroup(targetConnection.getGroup());
+    activeFollowSessions.put(player.getUniqueId(), target.getUniqueId());
+    String groupName = safeGroupName(targetConnection.getGroup());
+    sender.sendMessage(msg("messages.follow-success", "&aNow following %player% into %group%.")
+        .replace("%player%", playerName(target, args[0]))
+        .replace("%group%", groupName));
+    String details = "target=" + playerName(target, args[0]) + ", group=" + groupName;
+    String logId = recordAction(player.getUniqueId(), "follow", sender.getName(), details);
+    sendAuditLog(logId, "follow", sender, player, details);
+    return true;
+  }
+
+  private boolean handleUnfollowCommand(CommandSender sender) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(msg("messages.only-player", "&cPlayers only."));
+      return true;
+    }
+    if (!sender.hasPermission(getListenPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    UUID removed = activeFollowSessions.remove(player.getUniqueId());
+    if (removed == null) {
+      sender.sendMessage(msg("messages.unfollow-empty", "&eYou are not currently following anyone."));
+      return true;
+    }
+    sender.sendMessage(msg("messages.unfollow-success", "&aFollow mode disabled."));
+    String logId = recordAction(player.getUniqueId(), "unfollow", sender.getName(), "target=" + removed);
+    sendAuditLog(logId, "unfollow", sender, player, "target=" + removed);
+    return true;
+  }
+
+  private boolean handleForceLeaveCommand(CommandSender sender, String[] args) {
+    ensureServiceLoaded();
+    if (getVoicechatApiOrRetry(sender) == null) {
+      return true;
+    }
+    if (!sender.hasPermission(getKickPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.forceleave-usage", "&cUsage: /vcforceleave <group>"));
+      return true;
+    }
+    String groupName = String.join(" ", args).trim();
+    if (!requireConfirmation(sender, "forceleave:" + groupName.toLowerCase(Locale.ROOT),
+        msg("messages.confirm-forceleave", "&eRepeat the command to remove all players from %group%.")
+            .replace("%group%", groupName))) {
+      return true;
+    }
+    int count = 0;
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      VoicechatConnection connection = getConnection(online);
+      if (connection == null || connection.getGroup() == null) {
+        continue;
+      }
+      if (!safeGroupName(connection.getGroup()).equalsIgnoreCase(groupName)) {
+        continue;
+      }
+      connection.setGroup(null);
+      online.sendMessage(msg("messages.kicked-you", "&cYou were removed from your voice chat group."));
+      count++;
+    }
+    sender.sendMessage(msg("messages.forceleave-success", "&aRemoved %count% players from %group%.")
+        .replace("%count%", String.valueOf(count))
+        .replace("%group%", groupName));
+    String details = "group=" + groupName + ", count=" + count;
+    sendAuditLog(recordAction(null, "forceleave", sender.getName(), details), "forceleave", sender, null, details);
+    return true;
+  }
+
+  private boolean handleGroupInfoCommand(CommandSender sender, String[] args) {
+    ensureServiceLoaded();
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.groupinfo-usage", "&cUsage: /vcgroupinfo <group>"));
+      return true;
+    }
+    String groupName = String.join(" ", args).trim();
+    List<String> players = getPlayersInGroup(groupName);
+    List<String> listeners = getSessionPlayersForGroup(activeListenSessions, groupName);
+    List<String> spies = getSessionPlayersForGroup(activeSpySessions, groupName);
+    sender.sendMessage(msg("messages.groupinfo-header", "&6Voice group info for &e%group%").replace("%group%", groupName));
+    sender.sendMessage(msg("messages.groupinfo-stats", "&7Players: %players% &8| &7Locked: %locked% &8| &7Temporary: %temporary%")
+        .replace("%players%", String.valueOf(players.size()))
+        .replace("%locked%", isGroupLocked(groupName) ? msg("messages.state-yes", "&aYes") : msg("messages.state-no", "&cNo"))
+        .replace("%temporary%", temporaryGroups.contains(groupName) ? msg("messages.state-yes", "&aYes") : msg("messages.state-no", "&cNo")));
+    sender.sendMessage(msg("messages.groupinfo-monitoring", "&7Listeners: %listeners% &8| &7Spies: %spies%")
+        .replace("%listeners%", listeners.isEmpty() ? "-" : String.join(", ", listeners))
+        .replace("%spies%", spies.isEmpty() ? "-" : String.join(", ", spies)));
+    sender.sendMessage(msg("messages.groupinfo-players", "&7Members: %players%")
+        .replace("%players%", players.isEmpty() ? "-" : String.join(", ", players)));
+    return true;
+  }
+
+  private boolean handleSpyListCommand(CommandSender sender) {
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    sender.sendMessage(msg("messages.spylist-header", "&6Active monitoring sessions:"));
+    if (activeListenSessions.isEmpty() && activeSpySessions.isEmpty() && activeFollowSessions.isEmpty()) {
+      sender.sendMessage(msg("messages.spylist-empty", "&7No active listen, spy, or follow sessions."));
+      return true;
+    }
+    for (Map.Entry<UUID, String> entry : activeListenSessions.entrySet()) {
+      sender.sendMessage(msg("messages.spylist-listen-line", "&e[Listen] &b%player% &7-> %group%")
+          .replace("%player%", onlineName(entry.getKey()))
+          .replace("%group%", entry.getValue()));
+    }
+    for (Map.Entry<UUID, String> entry : activeSpySessions.entrySet()) {
+      sender.sendMessage(msg("messages.spylist-spy-line", "&e[Spy] &b%player% &7-> %group%")
+          .replace("%player%", onlineName(entry.getKey()))
+          .replace("%group%", entry.getValue()));
+    }
+    for (Map.Entry<UUID, UUID> entry : activeFollowSessions.entrySet()) {
+      sender.sendMessage(msg("messages.spylist-follow-line", "&e[Follow] &b%player% &7-> %target%")
+          .replace("%player%", onlineName(entry.getKey()))
+          .replace("%target%", onlineName(entry.getValue())));
+    }
     return true;
   }
 
@@ -1291,6 +1664,131 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
   }
 
+  private void initializeStorage() {
+    ensureMuteStore();
+    storage = new VoiceChatStorage(plugin);
+    storage.initialize();
+    auditSequence.set(storage.loadAuditSequence());
+    muteStore.replaceAll(storage.loadMutes());
+    loadStoredHistory();
+    loadStoredNotes();
+    loadStoredWarnings();
+    loadStoredGroupStates();
+    localePreferences.clear();
+    localePreferences.putAll(storage.loadLocalePreferences());
+  }
+
+  private void loadStoredHistory() {
+    actionHistory.clear();
+    for (Map.Entry<UUID, List<VoiceChatStorage.StoredAction>> entry : storage.loadHistory().entrySet()) {
+      Deque<VoiceActionRecord> records = new ArrayDeque<>();
+      for (VoiceChatStorage.StoredAction action : entry.getValue()) {
+        records.addLast(new VoiceActionRecord(
+            action.id(), action.createdAtMs(), action.action(), action.actor(), action.details()));
+        while (records.size() > MAX_HISTORY_PER_PLAYER) {
+          records.removeLast();
+        }
+      }
+      if (!records.isEmpty()) {
+        actionHistory.put(entry.getKey(), records);
+      }
+    }
+  }
+
+  private void loadStoredNotes() {
+    voiceNotes.clear();
+    for (Map.Entry<UUID, List<VoiceChatStorage.StoredNote>> entry : storage.loadNotes().entrySet()) {
+      List<VoiceNote> notes = new ArrayList<>();
+      for (VoiceChatStorage.StoredNote note : entry.getValue()) {
+        notes.add(new VoiceNote(note.createdAtMs(), note.actor(), note.text()));
+      }
+      if (!notes.isEmpty()) {
+        voiceNotes.put(entry.getKey(), notes);
+      }
+    }
+  }
+
+  private void loadStoredWarnings() {
+    voiceWarnings.clear();
+    for (Map.Entry<UUID, List<VoiceChatStorage.StoredWarning>> entry : storage.loadWarnings().entrySet()) {
+      List<VoiceWarning> warnings = new ArrayList<>();
+      for (VoiceChatStorage.StoredWarning warning : entry.getValue()) {
+        warnings.add(new VoiceWarning(warning.createdAtMs(), warning.actor(), warning.reason()));
+      }
+      if (!warnings.isEmpty()) {
+        voiceWarnings.put(entry.getKey(), warnings);
+      }
+    }
+  }
+
+  private void loadStoredGroupStates() {
+    lockedGroups.clear();
+    temporaryGroups.clear();
+    for (VoiceChatStorage.GroupState state : storage.loadGroupStates().values()) {
+      if (state.temporary()) {
+        temporaryGroups.add(state.name());
+      }
+      if (state.locked()) {
+        lockedGroups.add(state.name().toLowerCase(Locale.ROOT));
+      }
+    }
+  }
+
+  private void persistMute(UUID playerUuid) {
+    if (storage == null || muteStore == null || playerUuid == null) {
+      return;
+    }
+    VoiceChatMuteStore.MuteEntry entry = muteStore.getEntry(playerUuid);
+    if (entry == null) {
+      storage.deleteMute(playerUuid);
+    } else {
+      storage.saveMute(entry);
+    }
+  }
+
+  private void persistNotes(UUID playerUuid) {
+    if (storage == null || playerUuid == null) {
+      return;
+    }
+    List<VoiceChatStorage.StoredNote> notes = new ArrayList<>();
+    for (VoiceNote note : voiceNotes.getOrDefault(playerUuid, Collections.emptyList())) {
+      notes.add(new VoiceChatStorage.StoredNote(playerUuid, note.createdAtMs(), note.actor(), note.text()));
+    }
+    storage.replaceNotes(playerUuid, notes);
+  }
+
+  private void persistWarning(UUID playerUuid, VoiceWarning warning) {
+    if (storage == null || playerUuid == null || warning == null) {
+      return;
+    }
+    storage.appendWarning(new VoiceChatStorage.StoredWarning(
+        playerUuid, warning.createdAtMs(), warning.actor(), warning.reason()));
+  }
+
+  private void persistGroupState(String groupName) {
+    if (storage == null || groupName == null || groupName.isBlank()) {
+      return;
+    }
+    boolean temporary = temporaryGroups.contains(groupName);
+    boolean locked = lockedGroups.contains(groupName.toLowerCase(Locale.ROOT));
+    if (!temporary && !locked) {
+      storage.deleteGroupState(groupName);
+      return;
+    }
+    storage.saveGroupState(groupName, temporary, locked);
+  }
+
+  private void persistLocalePreference(UUID playerUuid, String locale) {
+    if (storage == null || playerUuid == null) {
+      return;
+    }
+    if (locale == null || locale.isBlank()) {
+      storage.deleteLocalePreference(playerUuid);
+    } else {
+      storage.saveLocalePreference(playerUuid, locale);
+    }
+  }
+
   private OfflinePlayer findOfflinePlayer(String name) {
     if (name == null || name.isBlank()) {
       return null;
@@ -1393,20 +1891,27 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return plugin.getConfig().getString(BASE_PATH + ".permissions.spy", getListenPermission());
   }
 
-  private void startAutoUnmuteTask() {
-    if (autoUnmuteTaskId != -1) {
+  private void startMaintenanceTask() {
+    if (maintenanceTaskId != -1) {
       return;
     }
-    long intervalTicks = Math.max(20L, plugin.getConfig().getLong(BASE_PATH + ".auto-unmute.check-interval-ticks", 20L * 15L));
-    autoUnmuteTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, this::processExpiredMutes,
+    long intervalTicks = Math.max(20L, plugin.getConfig().getLong(BASE_PATH + ".maintenance.interval-ticks",
+        plugin.getConfig().getLong(BASE_PATH + ".auto-unmute.check-interval-ticks", 20L * 15L)));
+    maintenanceTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, this::runMaintenance,
         intervalTicks, intervalTicks);
   }
 
-  private void stopAutoUnmuteTask() {
-    if (autoUnmuteTaskId != -1) {
-      Bukkit.getScheduler().cancelTask(autoUnmuteTaskId);
-      autoUnmuteTaskId = -1;
+  private void stopMaintenanceTask() {
+    if (maintenanceTaskId != -1) {
+      Bukkit.getScheduler().cancelTask(maintenanceTaskId);
+      maintenanceTaskId = -1;
     }
+  }
+
+  private void runMaintenance() {
+    processExpiredMutes();
+    syncFollowSessions();
+    cleanupEmptyTemporaryGroups();
   }
 
   private void processExpiredMutes() {
@@ -1414,6 +1919,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return;
     }
     for (VoiceChatMuteStore.MuteEntry entry : muteStore.consumeExpiredEntries()) {
+      persistMute(entry.getPlayerUuid());
       OfflinePlayer target = Bukkit.getOfflinePlayer(entry.getPlayerUuid());
       clearPermissionMute(target);
       applyMuteState(target, false);
@@ -1424,6 +1930,51 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       String logId = recordAction(entry.getPlayerUuid(), "auto-unmute", "System", details);
       sendAuditLog(logId, "auto-unmute", Bukkit.getConsoleSender(), target, details);
       plugin.getLogger().info("VoiceChat auto-unmute: " + playerName(target, entry.getPlayerUuid().toString()));
+    }
+  }
+
+  private void syncFollowSessions() {
+    if (activeFollowSessions.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<UUID, UUID> entry : new HashMap<>(activeFollowSessions).entrySet()) {
+      Player follower = Bukkit.getPlayer(entry.getKey());
+      if (follower == null || !follower.isOnline()) {
+        activeFollowSessions.remove(entry.getKey());
+        continue;
+      }
+      OfflinePlayer target = Bukkit.getOfflinePlayer(entry.getValue());
+      VoicechatConnection targetConnection = getConnection(target);
+      VoicechatConnection followerConnection = getConnection(follower);
+      if (targetConnection == null || targetConnection.getGroup() == null || followerConnection == null) {
+        continue;
+      }
+      Group targetGroup = targetConnection.getGroup();
+      if (followerConnection.getGroup() == null
+          || !safeGroupName(followerConnection.getGroup()).equalsIgnoreCase(safeGroupName(targetGroup))) {
+        followerConnection.setGroup(targetGroup);
+      }
+    }
+  }
+
+  private void cleanupEmptyTemporaryGroups() {
+    if (temporaryGroups.isEmpty()) {
+      return;
+    }
+    for (String groupName : new ArrayList<>(temporaryGroups)) {
+      if (!getPlayersInGroup(groupName).isEmpty()) {
+        continue;
+      }
+      if (!getSessionPlayersForGroup(activeListenSessions, groupName).isEmpty()) {
+        continue;
+      }
+      if (!getSessionPlayersForGroup(activeSpySessions, groupName).isEmpty()) {
+        continue;
+      }
+      temporaryGroups.remove(groupName);
+      lockedGroups.remove(groupName.toLowerCase(Locale.ROOT));
+      persistGroupState(groupName);
+      plugin.debugLog("Auto-cleaned temporary group " + groupName);
     }
   }
 
@@ -1443,6 +1994,40 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         online.sendMessage(message);
       }
     }
+  }
+
+  private List<String> getPlayersInGroup(String groupName) {
+    List<String> players = new ArrayList<>();
+    if (groupName == null || groupName.isBlank()) {
+      return players;
+    }
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      VoicechatConnection connection = getConnection(online);
+      if (connection == null || connection.getGroup() == null) {
+        continue;
+      }
+      if (safeGroupName(connection.getGroup()).equalsIgnoreCase(groupName)) {
+        players.add(online.getName());
+      }
+    }
+    players.sort(String.CASE_INSENSITIVE_ORDER);
+    return players;
+  }
+
+  private List<String> getSessionPlayersForGroup(Map<UUID, String> sessions, String groupName) {
+    List<String> names = new ArrayList<>();
+    for (Map.Entry<UUID, String> entry : sessions.entrySet()) {
+      if (entry.getValue() != null && entry.getValue().equalsIgnoreCase(groupName)) {
+        names.add(onlineName(entry.getKey()));
+      }
+    }
+    names.sort(String.CASE_INSENSITIVE_ORDER);
+    return names;
+  }
+
+  private String onlineName(UUID uuid) {
+    OfflinePlayer player = Bukkit.getOfflinePlayer(uuid);
+    return playerName(player, uuid == null ? "Unknown" : uuid.toString());
   }
 
   private boolean checkCooldown(CommandSender sender, String action) {
@@ -1569,6 +2154,8 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   public void onPlayerQuit(PlayerQuitEvent event) {
     activeListenSessions.remove(event.getPlayer().getUniqueId());
     activeSpySessions.remove(event.getPlayer().getUniqueId());
+    activeFollowSessions.remove(event.getPlayer().getUniqueId());
+    activeFollowSessions.entrySet().removeIf(entry -> entry.getValue().equals(event.getPlayer().getUniqueId()));
     PermissionAttachment attachment = mutePermissions.remove(event.getPlayer().getUniqueId());
     if (attachment != null) {
       try {
@@ -1977,15 +2564,25 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   }
 
   private String recordAction(UUID targetUuid, String action, String actor, String details) {
-    String id = "VC-" + String.format("%06d", auditSequence.incrementAndGet());
+    long sequence = auditSequence.incrementAndGet();
+    String id = "VC-" + String.format("%06d", sequence);
+    if (storage != null) {
+      storage.saveAuditSequence(sequence);
+    }
     if (targetUuid == null) {
       return id;
     }
+    long now = System.currentTimeMillis();
     Deque<VoiceActionRecord> records = actionHistory.computeIfAbsent(targetUuid, key -> new ArrayDeque<>());
-    records.addFirst(new VoiceActionRecord(id, System.currentTimeMillis(), action,
-        actor == null ? "" : actor, details == null ? "" : details));
+    VoiceActionRecord record = new VoiceActionRecord(id, now, action,
+        actor == null ? "" : actor, details == null ? "" : details);
+    records.addFirst(record);
     while (records.size() > MAX_HISTORY_PER_PLAYER) {
       records.removeLast();
+    }
+    if (storage != null) {
+      storage.appendHistory(new VoiceChatStorage.StoredAction(
+          record.id(), targetUuid, record.createdAtMs(), record.action(), record.actor(), record.details()));
     }
     return id;
   }
@@ -2105,6 +2702,12 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   }
 
   private String resolveLocale(CommandSender sender) {
+    if (sender instanceof Player player) {
+      String preferred = localePreferences.get(player.getUniqueId());
+      if (preferred != null && !preferred.isBlank()) {
+        return matchConfiguredLocale(preferred);
+      }
+    }
     if (shouldUsePlayerLocale() && sender instanceof Player player) {
       String matched = matchConfiguredLocale(player.getLocale());
       if (matched != null) {

@@ -62,6 +62,23 @@ public class VoiceChatMuteStore {
     muteEntries.put(uuid, new MuteEntry(uuid, now, until, moderator, reason));
   }
 
+  public void putEntry(MuteEntry entry) {
+    if (entry == null || entry.getPlayerUuid() == null) {
+      return;
+    }
+    muteEntries.put(entry.getPlayerUuid(), entry);
+  }
+
+  public void replaceAll(List<MuteEntry> entries) {
+    muteEntries.clear();
+    if (entries == null) {
+      return;
+    }
+    for (MuteEntry entry : entries) {
+      putEntry(entry);
+    }
+  }
+
   public void unmute(UUID uuid) {
     if (uuid == null) {
       return;
