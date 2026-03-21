@@ -1,0 +1,150 @@
+debug: false
+
+voicechat-admin:
+  enabled: true
+  permissions:
+    join: svca.join
+    broadcast: svca.broadcast
+    mute: svca.mute
+    list: svca.list
+    info: svca.info
+    kick: svca.kick
+    move: svca.move
+    listen: svca.listen
+    spy: svca.spy
+  broadcast:
+    group-name: broadcast
+    password: server-ip
+  cooldown-ms: 1500
+  confirm-window-ms: 7000
+  auto-unmute:
+    check-interval-ticks: 300
+  listen:
+    notify-group-members: true
+  audit-webhook:
+    enabled: false
+    url: ''
+    username: VoiceChat Admin
+    avatar-url: ''
+    content: ''
+    embed:
+      enabled: true
+      color: 3447003
+      colors:
+        red: 15548997
+        green: 5763719
+        blue: 3447003
+      title: '%action_label% | %target%'
+      description: |
+        Moderator: **%actor%**
+        Log ID: `%id%`
+
+        %details_pretty%
+      footer: VoiceChat Admin
+  localization:
+    folder: locales
+    default-locale: en
+    fallback-locale: en
+    use-player-locale: true
+  messages:
+    only-player: '&cPlayers only.'
+    no-permission: '&cYou do not have permission.'
+    api-not-available: '&cVoice chat API is not available.'
+    connection-error: '&cVoice chat connection not found.'
+    api-retrying: '&eVoice chat API is still loading. Please try again shortly.'
+    need-group: '&cPlease enter a group name.'
+    group-not-found: '&cGroup %group% was not found.'
+    group-locked: '&cGroup %group% is locked.'
+    joined: '&aJoined group %group%.'
+    broadcast-joined: '&aJoined the broadcast group.'
+    mute-usage: '&cUsage: /vcmute <player> [minutes] [reason]'
+    unmute-usage: '&cUsage: /vcunmute <player>'
+    info-usage: '&cUsage: /vcinfo <player>'
+    kick-usage: '&cUsage: /vckick <player>'
+    move-usage: '&cUsage: /vcmove <player> <group>'
+    history-usage: '&cUsage: /vchistory <player>'
+    warn-usage: '&cUsage: /vcwarn <player> <reason>'
+    notes-usage: '&cUsage: /vcnotes <player> [add|remove|list] [text/index]'
+    purge-usage: '&cUsage: /vcpurgehistory <player>'
+    export-usage: '&cUsage: /vcexport <player>'
+    muteedit-usage: '&cUsage: /vcmuteedit <player> <minutes|keep> [reason]'
+    muteall-usage: '&cUsage: /vcmuteall [minutes] [reason]'
+    lock-usage: '&cUsage: /%command% <group>'
+    create-usage: '&cUsage: /vccreate <group>'
+    delete-usage: '&cUsage: /vcdelete <group>'
+    pull-usage: '&cUsage: /vcpull <group>'
+    disconnect-usage: '&cUsage: /vcdisconnect <player>'
+    listen-usage: '&cUsage: /vclisten <group>'
+    spy-usage: '&cUsage: /vcspy <group>'
+    player-not-found: '&cPlayer not found.'
+    player-not-connected: '&ePlayer is not connected to voice chat.'
+    player-offline: '&ePlayer is offline. The mute will apply on join.'
+    player-offline-unmute: '&ePlayer is offline. The unmute will apply on join.'
+    cooldown: '&ePlease wait %seconds% seconds.'
+    confirm-purge: '&eRepeat the command to purge %player%''s voice history.'
+    confirm-muteall: '&eRepeat the command to mute all connected voice players.'
+    confirm-unmuteall: '&eRepeat the command to remove all voice mutes.'
+    confirm-deletegroup: '&eRepeat the command to delete %group%.'
+    confirm-pull: '&eRepeat the command to pull all voice players into %group%.'
+    mute-success: '&aMuted %player% in voice chat.'
+    unmute-success: '&aUnmuted %player% in voice chat.'
+    kick-success: '&aRemoved %player% from their voice chat group.'
+    move-success: '&aMoved %player% to group %group%.'
+    warn-success: '&aSaved a voice warning for %player%.'
+    notes-add-success: '&aSaved a note for %player%.'
+    notes-remove-success: '&aRemoved a note for %player%.'
+    notes-invalid-index: '&cInvalid note index.'
+    purge-success: '&aPurged voice history for %player%.'
+    muteedit-success: '&aUpdated the mute for %player%.'
+    muteedit-not-muted: '&eThat player is not currently muted.'
+    muteall-success: '&aMuted %count% voice players.'
+    unmuteall-success: '&aRemoved %count% voice mutes.'
+    lock-success: '&aLocked group %group%.'
+    unlock-success: '&aUnlocked group %group%.'
+    create-success: '&aCreated temporary group %group%.'
+    create-exists: '&eGroup %group% already exists.'
+    delete-success: '&aDeleted temporary group %group%.'
+    delete-missing: '&eTemporary group %group% was not found.'
+    pull-success: '&aMoved %count% players to %group%.'
+    disconnect-success: '&aDisconnected %player% from voice chat.'
+    reload-success: '&aReloaded the voice admin plugin.'
+    muted-you: '&cYou have been muted in voice chat.'
+    unmuted-you: '&aYou have been unmuted in voice chat.'
+    kicked-you: '&cYou were removed from your voice chat group.'
+    moved-you: '&eYou were moved to voice chat group %group%.'
+    disconnected-you: '&cYou were temporarily disconnected from voice chat.'
+    auto-unmuted-you: '&aYour voice chat mute has expired.'
+    list-header: '&6Active voice chat groups:'
+    list-empty: '&7No active voice chat groups found.'
+    list-line: '&e- %group% &7(%count%)'
+    info-header: '&6Voice chat info for &e%player%'
+    info-connected: '&7Connected: %value%'
+    info-group: '&7Group: %value%'
+    info-muted: '&7Muted: %value%'
+    info-mute-remaining: '&7Mute remaining: %value%'
+    info-moderator: '&7Moderator: %value%'
+    info-reason: '&7Reason: %value%'
+    history-header: '&6Voice history for &e%player%'
+    history-empty: '&7No voice history stored.'
+    history-line: '&e%id% &7| &8%time% &7| &f%action% &7| &b%actor% &7| %details%'
+    notes-header: '&6Voice notes for &e%player%'
+    notes-empty: '&7No voice notes stored.'
+    notes-line: '&e#%index% &7| &8%time% &7| &b%actor% &7| %text%'
+    export-header: '&6Voice export for &e%player%'
+    mutelist-header: '&6Active voice mutes:'
+    mutelist-empty: '&7No active voice mutes.'
+    mutelist-line: '&e- %player% &7| %remaining% &7| %moderator% &7| %reason%'
+    listen-success: '&aYou are now listening to %group%.'
+    unlisten-success: '&aListen mode disabled.'
+    unlisten-empty: '&eYou are not currently in listen mode.'
+    listen-notify-group: '&eA staff member is now listening in on %group%.'
+    spy-success: '&aSpy mode enabled for %group%.'
+    unspy-success: '&aSpy mode disabled.'
+    unspy-empty: '&eYou are not currently in spy mode.'
+    state-yes: '&aYes'
+    state-no: '&cNo'
+    no-group: '&7None'
+    not-muted: '&aNo'
+    mute-permanent: '&cPermanent'
+    unknown-value: '&7Unknown'
+    no-reason: '&7No reason'

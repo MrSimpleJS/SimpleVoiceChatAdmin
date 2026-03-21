@@ -1,0 +1,114 @@
+name: SimpleVoiceChatAdmin
+main: com.simple.voiceadmin.VoiceChatAdminPlugin
+version: 1.0.0
+api-version: '1.21'
+softdepend: [voicechat]
+authors: [Mr_Simple]
+
+commands:
+  adminjoin:
+    description: Join a Simple Voice Chat group
+    usage: /adminjoin <group>
+  broadcastvoice:
+    description: Join the broadcast voice group
+    usage: /broadcastvoice
+  vcmute:
+    description: Mute a player in voice chat
+    usage: /vcmute <player> [minutes] [reason]
+  vcunmute:
+    description: Unmute a player in voice chat
+    usage: /vcunmute <player>
+  vclist:
+    description: List active voice chat groups
+    usage: /vclist
+  vcinfo:
+    description: Show voice chat info about a player
+    usage: /vcinfo <player>
+  vckick:
+    description: Remove a player from their current voice chat group
+    usage: /vckick <player>
+  vcmove:
+    description: Move a player into a voice chat group
+    usage: /vcmove <player> <group>
+  vcmutelist:
+    description: Show active voice chat mutes
+    usage: /vcmutelist
+  vchistory:
+    description: Show voice chat action history for a player
+    usage: /vchistory <player>
+  vcwarn:
+    description: Add a voice warning
+    usage: /vcwarn <player> <reason>
+  vcnotes:
+    description: Manage internal voice notes
+    usage: /vcnotes <player> [add|remove|list] [text/index]
+  vcpurgehistory:
+    description: Purge voice history for a player
+    usage: /vcpurgehistory <player>
+  vcexport:
+    description: Export voice history for a player
+    usage: /vcexport <player>
+  vcmuteedit:
+    description: Edit an active voice mute
+    usage: /vcmuteedit <player> <minutes|keep> [reason]
+  vcmuteall:
+    description: Mute all connected voice players
+    usage: /vcmuteall [minutes] [reason]
+  vcunmuteall:
+    description: Unmute all voice mutes
+    usage: /vcunmuteall
+  vclock:
+    description: Lock a voice group
+    usage: /vclock <group>
+  vcunlock:
+    description: Unlock a voice group
+    usage: /vcunlock <group>
+  vccreate:
+    description: Create a temporary voice group
+    usage: /vccreate <group>
+  vcdelete:
+    description: Delete a temporary voice group
+    usage: /vcdelete <group>
+  vcpull:
+    description: Pull all voice players into a group
+    usage: /vcpull <group>
+  vcdisconnect:
+    description: Force-disconnect a player from voice chat
+    usage: /vcdisconnect <player>
+  vcreload:
+    description: Reload the voice admin plugin
+    usage: /vcreload
+  vclisten:
+    description: Join a voice group in staff listen mode
+    usage: /vclisten <group>
+  vcunlisten:
+    description: Leave staff listen mode
+    usage: /vcunlisten
+  vcspy:
+    description: Join a voice group in silent spy mode
+    usage: /vcspy <group>
+  vcunspy:
+    description: Leave silent spy mode
+    usage: /vcunspy
+
+permissions:
+  svca.join:
+    default: op
+  svca.broadcast:
+    default: op
+  svca.mute:
+    default: op
+  svca.list:
+    default: op
+  svca.info:
+    default: op
+  svca.kick:
+    default: op
+  svca.move:
+    default: op
+  svca.listen:
+    default: op
+  svca.spy:
+    default: op
+  svca.bypasscooldown:
+    default: op
