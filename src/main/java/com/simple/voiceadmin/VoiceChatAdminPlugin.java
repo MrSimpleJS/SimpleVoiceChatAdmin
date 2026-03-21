@@ -76,6 +76,7 @@ public class VoiceChatAdminPlugin extends JavaPlugin {
     register("vcunmute", true);
     register("vclist", false);
     register("vcinfo", true);
+    register("vcsession", true);
     register("vckick", true);
     register("vcmove", true);
     register("vcmutelist", false);
@@ -101,6 +102,7 @@ public class VoiceChatAdminPlugin extends JavaPlugin {
     register("vcforceleave", true);
     register("vcgroupinfo", true);
     register("vcspylist", false);
+    register("vcwebhook", true);
     register("vcreload", false);
     register("vclisten", true);
     register("vcunlisten", false);

@@ -24,6 +24,9 @@ commands:
   vcinfo:
     description: Show voice chat info about a player
     usage: /vcinfo <player>
+  vcsession:
+    description: Show the complete current voice session of a player
+    usage: /vcsession <player>
   vckick:
     description: Remove a player from their current voice chat group
     usage: /vckick <player>
@@ -99,6 +102,9 @@ commands:
   vcspylist:
     description: Show active listen, spy, and follow sessions
     usage: /vcspylist
+  vcwebhook:
+    description: Test the configured Discord webhook
+    usage: /vcwebhook test
   vcreload:
     description: Reload the voice admin plugin
     usage: /vcreload

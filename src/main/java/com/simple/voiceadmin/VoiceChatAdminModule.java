@@ -6,6 +6,7 @@ import de.maxhenkel.voicechat.api.VoicechatConnection;
 import de.maxhenkel.voicechat.api.VoicechatPlugin;
 import de.maxhenkel.voicechat.api.VoicechatServerApi;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.OfflinePlayer;
@@ -33,6 +35,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -107,6 +110,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     activeListenSessions.clear();
     activeSpySessions.clear();
     activeFollowSessions.clear();
+    if (storage != null) {
+      storage.shutdown();
+    }
     storage = null;
   }
 
@@ -129,6 +135,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       }
       if (name.equals("vcinfo")) {
         return handleInfoCommand(sender, args);
+      }
+      if (name.equals("vcsession")) {
+        return handleSessionCommand(sender, args);
       }
       if (name.equals("vckick")) {
         return handleKickCommand(sender, args);
@@ -205,6 +214,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       if (name.equals("vcspylist")) {
         return handleSpyListCommand(sender);
       }
+      if (name.equals("vcwebhook")) {
+        return handleWebhookCommand(sender, args);
+      }
       if (name.equals("vcreload")) {
         return handleReloadCommand(sender);
       }
@@ -244,10 +256,13 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         || name.equals("vckick") || name.equals("vcmove") || name.equals("vchistory")
         || name.equals("vcwarn") || name.equals("vcnotes") || name.equals("vcexport")
         || name.equals("vcmuteedit") || name.equals("vcdisconnect") || name.equals("vcpurgehistory")
-        || name.equals("vccase") || name.equals("vcfollow")) {
+        || name.equals("vccase") || name.equals("vcfollow") || name.equals("vcsession")) {
       if (args.length == 1) {
         return filterByPrefix(getKnownPlayerNames(), args[0]);
       }
+    }
+    if (name.equals("vcwebhook") && args.length == 1) {
+      return filterByPrefix(List.of("test"), args[0]);
     }
     if (name.equals("vclocale") && args.length == 1) {
       List<String> locales = new ArrayList<>(plugin.getAvailableLocales());
@@ -502,6 +517,56 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         .replace("%value%", muteEntry == null || muteEntry.getReason().isBlank()
             ? msg("messages.no-reason", "&7Kein Grund")
             : muteEntry.getReason()));
+    return true;
+  }
+
+  private boolean handleSessionCommand(CommandSender sender, String[] args) {
+    ensureServiceLoaded();
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.session-usage", "&cUsage: /vcsession <player>"));
+      return true;
+    }
+    OfflinePlayer target = findOfflinePlayer(args[0]);
+    if (target == null) {
+      sender.sendMessage(msg("messages.player-not-found", "&cPlayer not found."));
+      return true;
+    }
+    VoicechatConnection connection = getConnection(target);
+    boolean connected = connection != null;
+    String groupName = connected && connection.getGroup() != null
+        ? safeGroupName(connection.getGroup())
+        : msg("messages.no-group", "&7None");
+    VoiceChatMuteStore.MuteEntry muteEntry = muteStore == null ? null : muteStore.getEntry(target.getUniqueId());
+    String listenState = activeListenSessions.get(target.getUniqueId());
+    String spyState = activeSpySessions.get(target.getUniqueId());
+    UUID followTarget = activeFollowSessions.get(target.getUniqueId());
+    String followedBy = findFollowerName(target.getUniqueId());
+
+    sender.sendMessage(msg("messages.session-header", "&6Voice session for &e%player%")
+        .replace("%player%", playerName(target, args[0])));
+    sender.sendMessage(msg("messages.session-line-connected", "&7Connected: %value%")
+        .replace("%value%", connected ? msg("messages.state-yes", "&aYes") : msg("messages.state-no", "&cNo")));
+    sender.sendMessage(msg("messages.session-line-group", "&7Group: %value%").replace("%value%", groupName));
+    sender.sendMessage(msg("messages.session-line-group-size", "&7Group size: %value%")
+        .replace("%value%", String.valueOf(getPlayersInGroup(groupName).size())));
+    sender.sendMessage(msg("messages.session-line-muted", "&7Muted: %value%")
+        .replace("%value%", muteEntry == null ? msg("messages.state-no", "&cNo") : msg("messages.state-yes", "&aYes")));
+    sender.sendMessage(msg("messages.session-line-remaining", "&7Mute remaining: %value%")
+        .replace("%value%", muteEntry == null ? msg("messages.not-muted", "&aNo") : formatRemainingMute(muteStore.getRemainingMs(target.getUniqueId()))));
+    sender.sendMessage(msg("messages.session-line-locale", "&7Locale: %value%")
+        .replace("%value%", resolveLocaleForPlayer(target)));
+    sender.sendMessage(msg("messages.session-line-listen", "&7Listen mode: %value%")
+        .replace("%value%", listenState == null ? msg("messages.state-no", "&cNo") : listenState));
+    sender.sendMessage(msg("messages.session-line-spy", "&7Spy mode: %value%")
+        .replace("%value%", spyState == null ? msg("messages.state-no", "&cNo") : spyState));
+    sender.sendMessage(msg("messages.session-line-follow", "&7Following: %value%")
+        .replace("%value%", followTarget == null ? msg("messages.state-no", "&cNo") : onlineName(followTarget)));
+    sender.sendMessage(msg("messages.session-line-followed-by", "&7Followed by: %value%")
+        .replace("%value%", followedBy == null ? msg("messages.state-no", "&cNo") : followedBy));
     return true;
   }
 
@@ -1452,6 +1517,57 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return true;
   }
 
+  private boolean handleWebhookCommand(CommandSender sender, String[] args) {
+    if (!sender.hasPermission(getInfoPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0 || !args[0].equalsIgnoreCase("test")) {
+      sender.sendMessage(msg("messages.webhook-usage", "&cUsage: /vcwebhook test"));
+      return true;
+    }
+    String url = plugin.getConfig().getString(BASE_PATH + ".audit-webhook.url", "");
+    if (url == null || url.isBlank()) {
+      sender.sendMessage(msg("messages.webhook-missing", "&cNo webhook URL configured."));
+      return true;
+    }
+    String actorName = sender.getName();
+    String action = "webhook-test";
+    String actionLabel = prettifyAuditAction(action);
+    String details = "status=manual test";
+    String detailsPretty = prettifyAuditDetails(details);
+    String title = renderAuditTemplate(
+        plugin.getConfig().getString(BASE_PATH + ".audit-webhook.embed.title", "%action_label% | %target%"),
+        "TEST", actorName, action, actionLabel, "Webhook", null, details, detailsPretty);
+    String description = renderAuditTemplate(
+        plugin.getConfig().getString(BASE_PATH + ".audit-webhook.embed.description",
+            "Moderator: **%actor%**\nLog-ID: `%id%`\n\n%details_pretty%"),
+        "TEST", actorName, action, actionLabel, "Webhook", null, details, detailsPretty);
+    String footer = renderAuditTemplate(
+        plugin.getConfig().getString(BASE_PATH + ".audit-webhook.embed.footer", "VoiceChat Admin"),
+        "TEST", actorName, action, actionLabel, "Webhook", null, details, detailsPretty);
+    sender.sendMessage(msg("messages.webhook-testing", "&eSending webhook test..."));
+    sendWebhookAsync(
+        url,
+        plugin.getConfig().getString(BASE_PATH + ".audit-webhook.username", "VoiceChat Audit"),
+        plugin.getConfig().getString(BASE_PATH + ".audit-webhook.avatar-url", ""),
+        "",
+        plugin.getConfig().getBoolean(BASE_PATH + ".audit-webhook.embed.enabled", true),
+        title,
+        description,
+        getAuditColor(action),
+        footer,
+        (success, message) -> Bukkit.getScheduler().runTask(plugin, () -> {
+          if (success) {
+            sender.sendMessage(msg("messages.webhook-success", "&aWebhook test sent successfully."));
+          } else {
+            sender.sendMessage(msg("messages.webhook-failed", "&cWebhook test failed: %message%")
+                .replace("%message%", message == null || message.isBlank() ? "unknown" : message));
+          }
+        }));
+    return true;
+  }
+
   private boolean handleReloadCommand(CommandSender sender) {
     if (!sender.hasPermission(getMovePermission())) {
       sender.sendMessage(msg("messages.no-permission", "&cKeine Rechte."));
@@ -2030,6 +2146,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return playerName(player, uuid == null ? "Unknown" : uuid.toString());
   }
 
+  private String findFollowerName(UUID targetUuid) {
+    for (Map.Entry<UUID, UUID> entry : activeFollowSessions.entrySet()) {
+      if (entry.getValue().equals(targetUuid)) {
+        return onlineName(entry.getKey());
+      }
+    }
+    return null;
+  }
+
   private boolean checkCooldown(CommandSender sender, String action) {
     if (!(sender instanceof Player player)) {
       return true;
@@ -2181,6 +2306,11 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   }
 
   private void sendAuditLog(String logId, String action, CommandSender sender, OfflinePlayer target, String details) {
+    String actorName = sender == null ? "Unknown" : sender.getName();
+    String targetName = target == null ? "All" : playerName(target, "Unknown");
+    String actionLabel = prettifyAuditAction(action);
+    String detailsPretty = prettifyAuditDetails(details);
+    writeYamlAuditLog(logId, action, actionLabel, actorName, targetName, target, details, detailsPretty);
     if (!plugin.getConfig().getBoolean(BASE_PATH + ".audit-webhook.enabled", false)) {
       return;
     }
@@ -2188,10 +2318,6 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     if (url == null || url.isBlank()) {
       return;
     }
-    String actorName = sender == null ? "Unknown" : sender.getName();
-    String targetName = target == null ? "All" : playerName(target, "Unknown");
-    String actionLabel = prettifyAuditAction(action);
-    String detailsPretty = prettifyAuditDetails(details);
     String template = plugin.getConfig().getString(
         BASE_PATH + ".audit-webhook.content",
         "[VoiceChat] %actor% -> %action% -> %target% (%details%)");
@@ -2213,7 +2339,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         logId, actorName, action, actionLabel, targetName, target, details, detailsPretty);
     int color = getAuditColor(action);
 
-    sendWebhookAsync(url, username, avatarUrl, content, useEmbed, title, description, color, footer);
+    sendWebhookAsync(url, username, avatarUrl, content, useEmbed, title, description, color, footer, null);
   }
 
   private int getAuditColor(String action) {
@@ -2224,7 +2350,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
           plugin.getConfig().getInt(base + "red", 0xED4245);
       case "unmute", "unmuteall" ->
           plugin.getConfig().getInt(base + "green", 0x57F287);
-      case "move", "pull", "create-group", "lock", "unlock", "reload", "listen", "unlisten", "spy", "unspy", "auto-unmute" ->
+      case "move", "pull", "create-group", "lock", "unlock", "reload", "listen", "unlisten", "spy", "unspy", "auto-unmute", "follow", "unfollow", "webhook-test" ->
           plugin.getConfig().getInt(base + "blue", 0x3498DB);
       default -> plugin.getConfig().getInt(BASE_PATH + ".audit-webhook.embed.color", 3447003);
     };
@@ -2275,6 +2401,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       case "spy" -> "Spy Mode";
       case "unspy" -> "Spy Mode Disabled";
       case "auto-unmute" -> "Auto-Unmute";
+      case "follow" -> "Follow Mode";
+      case "unfollow" -> "Follow Mode Disabled";
+      case "webhook-test" -> "Webhook Test";
       default -> action.substring(0, 1).toUpperCase(Locale.ROOT) + action.substring(1);
     };
   }
@@ -2318,8 +2447,56 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     };
   }
 
+  private void writeYamlAuditLog(String logId, String action, String actionLabel, String actorName,
+      String targetName, OfflinePlayer target, String details, String detailsPretty) {
+    if (!plugin.getConfig().getBoolean(BASE_PATH + ".audit-yaml.enabled", true)) {
+      return;
+    }
+    Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+      try {
+        File file = new File(plugin.getDataFolder(),
+            plugin.getConfig().getString(BASE_PATH + ".audit-yaml.file", "audit-log.yml"));
+        if (!file.getParentFile().exists()) {
+          file.getParentFile().mkdirs();
+        }
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        String key = "entries." + System.currentTimeMillis() + "_" + (logId == null ? "noid" : logId.replace(":", "_"));
+        yaml.set(key + ".id", logId == null ? "-" : logId);
+        yaml.set(key + ".action", action);
+        yaml.set(key + ".action-label", actionLabel);
+        yaml.set(key + ".actor", actorName);
+        yaml.set(key + ".target", targetName);
+        yaml.set(key + ".target-uuid", target == null ? "" : target.getUniqueId().toString());
+        yaml.set(key + ".details", details == null ? "" : details);
+        yaml.set(key + ".details-pretty", detailsPretty == null ? "" : detailsPretty);
+        yaml.set(key + ".timestamp", ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
+        pruneYamlAuditEntries(yaml);
+        yaml.save(file);
+      } catch (Exception ex) {
+        plugin.getLogger().warning("VoiceChat YAML audit log failed: " + ex.getMessage());
+      }
+    });
+  }
+
+  private void pruneYamlAuditEntries(YamlConfiguration yaml) {
+    int maxEntries = Math.max(100, plugin.getConfig().getInt(BASE_PATH + ".audit-yaml.max-entries", 5000));
+    if (yaml.getConfigurationSection("entries") == null) {
+      return;
+    }
+    List<String> keys = new ArrayList<>(yaml.getConfigurationSection("entries").getKeys(false));
+    if (keys.size() <= maxEntries) {
+      return;
+    }
+    keys.sort(String.CASE_INSENSITIVE_ORDER);
+    int removeCount = keys.size() - maxEntries;
+    for (int i = 0; i < removeCount; i++) {
+      yaml.set("entries." + keys.get(i), null);
+    }
+  }
+
   private void sendWebhookAsync(String url, String username, String avatarUrl, String content,
-      boolean embed, String title, String description, int color, String footer) {
+      boolean embed, String title, String description, int color, String footer,
+      BiConsumer<Boolean, String> callback) {
     String payload = buildWebhookPayload(username, avatarUrl, content, embed, title, description, color, footer);
     Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
       try {
@@ -2338,15 +2515,28 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
           String body = readResponseBody(connection);
           if (body == null || body.isBlank()) {
             plugin.getLogger().warning("VoiceChat Discord webhook failed (HTTP " + code + ").");
+            if (callback != null) {
+              callback.accept(false, "HTTP " + code);
+            }
           } else {
             plugin.getLogger().warning("VoiceChat Discord webhook failed (HTTP " + code + "): " + body);
+            if (callback != null) {
+              callback.accept(false, "HTTP " + code + ": " + body);
+            }
           }
           if (plugin.getConfig().getBoolean("debug-discord", false)) {
             plugin.getLogger().warning("VoiceChat Discord webhook payload: " + payload);
           }
+          return;
+        }
+        if (callback != null) {
+          callback.accept(true, "");
         }
       } catch (Exception ex) {
         plugin.getLogger().warning("VoiceChat Discord webhook failed: " + ex.getMessage());
+        if (callback != null) {
+          callback.accept(false, ex.getMessage());
+        }
       }
     });
   }
@@ -2364,7 +2554,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     String title = "Export | " + (target == null ? "Unknown" : playerName(target, "Unknown"));
     String header = "Erstellt von: " + (sender == null ? "Unknown" : sender.getName());
     sendWebhookAsync(url, username, avatarUrl, "", true, title,
-        header + "\n\n```" + trimForDiscord(export, 1500) + "```", getAuditColor(action), "VoiceChat Admin");
+        header + "\n\n```" + trimForDiscord(export, 1500) + "```", getAuditColor(action), "VoiceChat Admin", null);
   }
 
   private String trimForDiscord(String text, int limit) {
@@ -2713,6 +2903,20 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       if (matched != null) {
         return matched;
       }
+    }
+    return matchConfiguredLocale(getDefaultLocale());
+  }
+
+  private String resolveLocaleForPlayer(OfflinePlayer player) {
+    if (player == null) {
+      return matchConfiguredLocale(getDefaultLocale());
+    }
+    String preferred = localePreferences.get(player.getUniqueId());
+    if (preferred != null && !preferred.isBlank()) {
+      return matchConfiguredLocale(preferred);
+    }
+    if (shouldUsePlayerLocale() && player.isOnline() && player.getPlayer() != null) {
+      return matchConfiguredLocale(player.getPlayer().getLocale());
     }
     return matchConfiguredLocale(getDefaultLocale());
   }

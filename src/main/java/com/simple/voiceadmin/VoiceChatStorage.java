@@ -11,12 +11,20 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class VoiceChatStorage {
+  private static final int CURRENT_SCHEMA_VERSION = 2;
   private final VoiceChatAdminPlugin plugin;
   private final File databaseFile;
+  private final ExecutorService writeExecutor = Executors.newSingleThreadExecutor(r -> {
+    Thread thread = new Thread(r, "SimpleVoiceChatAdmin-SQLite");
+    thread.setDaemon(true);
+    return thread;
+  });
 
   public VoiceChatStorage(VoiceChatAdminPlugin plugin) {
     this.plugin = plugin;
@@ -30,24 +38,25 @@ public class VoiceChatStorage {
     }
     try (Connection connection = openConnection(); Statement statement = connection.createStatement()) {
       statement.executeUpdate("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS mutes (player_uuid TEXT PRIMARY KEY, created_at INTEGER NOT NULL, "
-              + "muted_until INTEGER NOT NULL, moderator TEXT NOT NULL, reason TEXT NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS history (log_id TEXT PRIMARY KEY, target_uuid TEXT NOT NULL, "
-              + "created_at INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, details TEXT NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS notes (target_uuid TEXT NOT NULL, created_at INTEGER NOT NULL, "
-              + "actor TEXT NOT NULL, text TEXT NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS warnings (target_uuid TEXT NOT NULL, created_at INTEGER NOT NULL, "
-              + "actor TEXT NOT NULL, reason TEXT NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY, temp INTEGER NOT NULL, locked INTEGER NOT NULL)");
-      statement.executeUpdate(
-          "CREATE TABLE IF NOT EXISTS locale_preferences (player_uuid TEXT PRIMARY KEY, locale TEXT NOT NULL)");
+      int currentVersion = getSchemaVersion(connection);
+      for (int version = currentVersion + 1; version <= CURRENT_SCHEMA_VERSION; version++) {
+        migrate(connection, version);
+        setSchemaVersion(connection, version);
+      }
     } catch (Exception ex) {
       plugin.getLogger().warning("Failed to initialize SQLite storage: " + ex.getMessage());
+    }
+  }
+
+  public void shutdown() {
+    writeExecutor.shutdown();
+    try {
+      if (!writeExecutor.awaitTermination(5L, TimeUnit.SECONDS)) {
+        writeExecutor.shutdownNow();
+      }
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      writeExecutor.shutdownNow();
     }
   }
 
@@ -67,7 +76,14 @@ public class VoiceChatStorage {
   }
 
   public void saveAuditSequence(long value) {
-    executeUpsertMeta("audit_sequence", String.valueOf(value));
+    executeAsync("save meta value", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
+        statement.setString(1, "audit_sequence");
+        statement.setString(2, String.valueOf(value));
+        statement.executeUpdate();
+      }
+    });
   }
 
   public List<VoiceChatMuteStore.MuteEntry> loadMutes() {
@@ -95,20 +111,19 @@ public class VoiceChatStorage {
     if (entry == null || entry.getPlayerUuid() == null) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT INTO mutes(player_uuid, created_at, muted_until, moderator, reason) VALUES (?, ?, ?, ?, ?) "
-                 + "ON CONFLICT(player_uuid) DO UPDATE SET created_at=excluded.created_at, "
-                 + "muted_until=excluded.muted_until, moderator=excluded.moderator, reason=excluded.reason")) {
-      statement.setString(1, entry.getPlayerUuid().toString());
-      statement.setLong(2, entry.getCreatedAtMs());
-      statement.setLong(3, entry.getMutedUntilMs());
-      statement.setString(4, entry.getModerator());
-      statement.setString(5, entry.getReason());
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to save mute: " + ex.getMessage());
-    }
+    executeAsync("save mute", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT INTO mutes(player_uuid, created_at, muted_until, moderator, reason) VALUES (?, ?, ?, ?, ?) "
+              + "ON CONFLICT(player_uuid) DO UPDATE SET created_at=excluded.created_at, "
+              + "muted_until=excluded.muted_until, moderator=excluded.moderator, reason=excluded.reason")) {
+        statement.setString(1, entry.getPlayerUuid().toString());
+        statement.setLong(2, entry.getCreatedAtMs());
+        statement.setLong(3, entry.getMutedUntilMs());
+        statement.setString(4, entry.getModerator());
+        statement.setString(5, entry.getReason());
+        statement.executeUpdate();
+      }
+    });
   }
 
   public void deleteMute(UUID playerUuid) {
@@ -119,8 +134,7 @@ public class VoiceChatStorage {
     Map<UUID, List<StoredAction>> history = new HashMap<>();
     try (Connection connection = openConnection();
          PreparedStatement statement = connection.prepareStatement(
-             "SELECT log_id, target_uuid, created_at, action, actor, details FROM history "
-                 + "ORDER BY created_at DESC")) {
+             "SELECT log_id, target_uuid, created_at, action, actor, details FROM history ORDER BY created_at DESC")) {
       try (ResultSet resultSet = statement.executeQuery()) {
         while (resultSet.next()) {
           UUID uuid = UUID.fromString(resultSet.getString("target_uuid"));
@@ -143,20 +157,19 @@ public class VoiceChatStorage {
     if (action == null || action.targetUuid() == null || action.id() == null) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT OR REPLACE INTO history(log_id, target_uuid, created_at, action, actor, details) "
-                 + "VALUES (?, ?, ?, ?, ?, ?)")) {
-      statement.setString(1, action.id());
-      statement.setString(2, action.targetUuid().toString());
-      statement.setLong(3, action.createdAtMs());
-      statement.setString(4, action.action());
-      statement.setString(5, action.actor());
-      statement.setString(6, action.details());
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to append history: " + ex.getMessage());
-    }
+    executeAsync("append history", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT OR REPLACE INTO history(log_id, target_uuid, created_at, action, actor, details) "
+              + "VALUES (?, ?, ?, ?, ?, ?)")) {
+        statement.setString(1, action.id());
+        statement.setString(2, action.targetUuid().toString());
+        statement.setLong(3, action.createdAtMs());
+        statement.setString(4, action.action());
+        statement.setString(5, action.actor());
+        statement.setString(6, action.details());
+        statement.executeUpdate();
+      }
+    });
   }
 
   public void deleteHistory(UUID playerUuid) {
@@ -188,7 +201,7 @@ public class VoiceChatStorage {
     if (playerUuid == null) {
       return;
     }
-    try (Connection connection = openConnection()) {
+    executeAsync("replace notes", connection -> {
       connection.setAutoCommit(false);
       try (PreparedStatement delete = connection.prepareStatement("DELETE FROM notes WHERE target_uuid = ?");
            PreparedStatement insert = connection.prepareStatement(
@@ -212,9 +225,7 @@ public class VoiceChatStorage {
       } finally {
         connection.setAutoCommit(true);
       }
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to replace notes: " + ex.getMessage());
-    }
+    });
   }
 
   public Map<UUID, List<StoredWarning>> loadWarnings() {
@@ -242,17 +253,16 @@ public class VoiceChatStorage {
     if (warning == null || warning.targetUuid() == null) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT INTO warnings(target_uuid, created_at, actor, reason) VALUES (?, ?, ?, ?)")) {
-      statement.setString(1, warning.targetUuid().toString());
-      statement.setLong(2, warning.createdAtMs());
-      statement.setString(3, warning.actor());
-      statement.setString(4, warning.reason());
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to append warning: " + ex.getMessage());
-    }
+    executeAsync("append warning", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT INTO warnings(target_uuid, created_at, actor, reason) VALUES (?, ?, ?, ?)")) {
+        statement.setString(1, warning.targetUuid().toString());
+        statement.setLong(2, warning.createdAtMs());
+        statement.setString(3, warning.actor());
+        statement.setString(4, warning.reason());
+        statement.executeUpdate();
+      }
+    });
   }
 
   public Map<String, GroupState> loadGroupStates() {
@@ -278,30 +288,28 @@ public class VoiceChatStorage {
     if (groupName == null || groupName.isBlank()) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT INTO groups(name, temp, locked) VALUES (?, ?, ?) "
-                 + "ON CONFLICT(name) DO UPDATE SET temp=excluded.temp, locked=excluded.locked")) {
-      statement.setString(1, groupName);
-      statement.setInt(2, temporary ? 1 : 0);
-      statement.setInt(3, locked ? 1 : 0);
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to save group state: " + ex.getMessage());
-    }
+    executeAsync("save group state", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT INTO groups(name, temp, locked) VALUES (?, ?, ?) "
+              + "ON CONFLICT(name) DO UPDATE SET temp=excluded.temp, locked=excluded.locked")) {
+        statement.setString(1, groupName);
+        statement.setInt(2, temporary ? 1 : 0);
+        statement.setInt(3, locked ? 1 : 0);
+        statement.executeUpdate();
+      }
+    });
   }
 
   public void deleteGroupState(String groupName) {
     if (groupName == null || groupName.isBlank()) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement("DELETE FROM groups WHERE name = ?")) {
-      statement.setString(1, groupName);
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to delete group state: " + ex.getMessage());
-    }
+    executeAsync("delete group state", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement("DELETE FROM groups WHERE name = ?")) {
+        statement.setString(1, groupName);
+        statement.executeUpdate();
+      }
+    });
   }
 
   public Map<UUID, String> loadLocalePreferences() {
@@ -324,31 +332,71 @@ public class VoiceChatStorage {
     if (playerUuid == null || locale == null || locale.isBlank()) {
       return;
     }
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT INTO locale_preferences(player_uuid, locale) VALUES (?, ?) "
-                 + "ON CONFLICT(player_uuid) DO UPDATE SET locale=excluded.locale")) {
-      statement.setString(1, playerUuid.toString());
-      statement.setString(2, locale);
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to save locale preference: " + ex.getMessage());
-    }
+    executeAsync("save locale preference", connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(
+          "INSERT INTO locale_preferences(player_uuid, locale) VALUES (?, ?) "
+              + "ON CONFLICT(player_uuid) DO UPDATE SET locale=excluded.locale")) {
+        statement.setString(1, playerUuid.toString());
+        statement.setString(2, locale);
+        statement.executeUpdate();
+      }
+    });
   }
 
   public void deleteLocalePreference(UUID playerUuid) {
     executeDeleteByUuid("DELETE FROM locale_preferences WHERE player_uuid = ?", playerUuid, "delete locale preference");
   }
 
-  private void executeUpsertMeta(String key, String value) {
-    try (Connection connection = openConnection();
-         PreparedStatement statement = connection.prepareStatement(
-             "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
-      statement.setString(1, key);
-      statement.setString(2, value);
+  private void migrate(Connection connection, int version) throws Exception {
+    try (Statement statement = connection.createStatement()) {
+      switch (version) {
+        case 1 -> {
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS mutes (player_uuid TEXT PRIMARY KEY, created_at INTEGER NOT NULL, "
+                  + "muted_until INTEGER NOT NULL, moderator TEXT NOT NULL, reason TEXT NOT NULL)");
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS history (log_id TEXT PRIMARY KEY, target_uuid TEXT NOT NULL, "
+                  + "created_at INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, details TEXT NOT NULL)");
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS notes (target_uuid TEXT NOT NULL, created_at INTEGER NOT NULL, "
+                  + "actor TEXT NOT NULL, text TEXT NOT NULL)");
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS warnings (target_uuid TEXT NOT NULL, created_at INTEGER NOT NULL, "
+                  + "actor TEXT NOT NULL, reason TEXT NOT NULL)");
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY, temp INTEGER NOT NULL, locked INTEGER NOT NULL)");
+          statement.executeUpdate(
+              "CREATE TABLE IF NOT EXISTS locale_preferences (player_uuid TEXT PRIMARY KEY, locale TEXT NOT NULL)");
+        }
+        case 2 -> {
+          statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_history_target_created ON history(target_uuid, created_at DESC)");
+          statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_notes_target_created ON notes(target_uuid, created_at DESC)");
+          statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_warnings_target_created ON warnings(target_uuid, created_at DESC)");
+        }
+        default -> {
+        }
+      }
+    }
+  }
+
+  private int getSchemaVersion(Connection connection) throws Exception {
+    try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM meta WHERE key = ?")) {
+      statement.setString(1, "schema_version");
+      try (ResultSet resultSet = statement.executeQuery()) {
+        if (resultSet.next()) {
+          return Integer.parseInt(resultSet.getString("value"));
+        }
+      }
+    }
+    return 0;
+  }
+
+  private void setSchemaVersion(Connection connection, int version) throws Exception {
+    try (PreparedStatement statement = connection.prepareStatement(
+        "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
+      statement.setString(1, "schema_version");
+      statement.setString(2, String.valueOf(version));
       statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to save meta value: " + ex.getMessage());
     }
   }
 
@@ -356,16 +404,31 @@ public class VoiceChatStorage {
     if (playerUuid == null) {
       return;
     }
-    try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
-      statement.setString(1, playerUuid.toString());
-      statement.executeUpdate();
-    } catch (Exception ex) {
-      plugin.getLogger().warning("Failed to " + action + ": " + ex.getMessage());
-    }
+    executeAsync(action, connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        statement.setString(1, playerUuid.toString());
+        statement.executeUpdate();
+      }
+    });
+  }
+
+  private void executeAsync(String action, SqlTask task) {
+    writeExecutor.execute(() -> {
+      try (Connection connection = openConnection()) {
+        task.run(connection);
+      } catch (Exception ex) {
+        plugin.getLogger().warning("Failed to " + action + ": " + ex.getMessage());
+      }
+    });
   }
 
   private Connection openConnection() throws Exception {
     return DriverManager.getConnection("jdbc:sqlite:" + databaseFile.getAbsolutePath());
+  }
+
+  @FunctionalInterface
+  private interface SqlTask {
+    void run(Connection connection) throws Exception;
   }
 
   public record StoredAction(String id, UUID targetUuid, long createdAtMs, String action, String actor, String details) {

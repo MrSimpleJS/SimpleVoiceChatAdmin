@@ -45,6 +45,10 @@ voicechat-admin:
 
         %details_pretty%
       footer: VoiceChat Admin
+  audit-yaml:
+    enabled: true
+    file: audit-log.yml
+    max-entries: 5000
   localization:
     folder: locales
     default-locale: en
@@ -64,6 +68,7 @@ voicechat-admin:
     mute-usage: '&cUsage: /vcmute <player> [minutes] [reason]'
     unmute-usage: '&cUsage: /vcunmute <player>'
     info-usage: '&cUsage: /vcinfo <player>'
+    session-usage: '&cUsage: /vcsession <player>'
     kick-usage: '&cUsage: /vckick <player>'
     move-usage: '&cUsage: /vcmove <player> <group>'
     history-usage: '&cUsage: /vchistory <player>'
@@ -83,6 +88,7 @@ voicechat-admin:
     follow-usage: '&cUsage: /vcfollow <player>'
     forceleave-usage: '&cUsage: /vcforceleave <group>'
     groupinfo-usage: '&cUsage: /vcgroupinfo <group>'
+    webhook-usage: '&cUsage: /vcwebhook test'
     listen-usage: '&cUsage: /vclisten <group>'
     spy-usage: '&cUsage: /vcspy <group>'
     player-not-found: '&cPlayer not found.'
@@ -164,10 +170,25 @@ voicechat-admin:
     locale-set: '&aLocale set to %locale%.'
     locale-reset: '&aLocale preference reset to automatic.'
     locale-invalid: '&cLocale %locale% is not available.'
+    webhook-missing: '&cNo webhook URL configured.'
+    webhook-testing: '&eSending webhook test...'
+    webhook-success: '&aWebhook test sent successfully.'
+    webhook-failed: '&cWebhook test failed: %message%'
     groupinfo-header: '&6Voice group info for &e%group%'
     groupinfo-stats: '&7Players: %players% &8| &7Locked: %locked% &8| &7Temporary: %temporary%'
     groupinfo-monitoring: '&7Listeners: %listeners% &8| &7Spies: %spies%'
     groupinfo-players: '&7Members: %players%'
+    session-header: '&6Voice session for &e%player%'
+    session-line-connected: '&7Connected: %value%'
+    session-line-group: '&7Group: %value%'
+    session-line-group-size: '&7Group size: %value%'
+    session-line-muted: '&7Muted: %value%'
+    session-line-remaining: '&7Mute remaining: %value%'
+    session-line-locale: '&7Locale: %value%'
+    session-line-listen: '&7Listen mode: %value%'
+    session-line-spy: '&7Spy mode: %value%'
+    session-line-follow: '&7Following: %value%'
+    session-line-followed-by: '&7Followed by: %value%'
     mutelist-header: '&6Active voice mutes:'
     mutelist-empty: '&7No active voice mutes.'
     mutelist-line: '&e- %player% &7| %remaining% &7| %moderator% &7| %reason%'
