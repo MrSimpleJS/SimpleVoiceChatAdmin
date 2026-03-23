@@ -13,13 +13,9 @@ import org.bukkit.entity.Player;
 
 public class BroadcastVoicechatPlugin implements VoicechatPlugin {
   private final VoiceChatAdminPlugin plugin;
-  private final String permission;
-  private final String groupName;
 
-  public BroadcastVoicechatPlugin(VoiceChatAdminPlugin plugin, String permission, String groupName) {
+  public BroadcastVoicechatPlugin(VoiceChatAdminPlugin plugin) {
     this.plugin = plugin;
-    this.permission = permission == null ? "" : permission;
-    this.groupName = groupName == null ? "broadcast" : groupName;
   }
 
   @Override
@@ -44,14 +40,17 @@ public class BroadcastVoicechatPlugin implements VoicechatPlugin {
     if (!(rawPlayer instanceof Player player)) {
       return;
     }
-    if (!permission.isEmpty() && !player.hasPermission(permission)) {
+    String permission = plugin.getConfig().getString("voicechat-admin.permissions.broadcast", "svca.broadcast");
+    if (permission != null && !permission.isBlank() && !player.hasPermission(permission)) {
       return;
     }
+    String groupName = plugin.getConfig().getString("voicechat-admin.broadcast.group-name", "broadcast");
     Group group = event.getSenderConnection().getGroup();
     if (group == null || group.getName() == null) {
       return;
     }
-    if (!group.getName().trim().equalsIgnoreCase(groupName)) {
+    if (groupName == null || groupName.isBlank()
+        || !group.getName().trim().equalsIgnoreCase(groupName.trim())) {
       return;
     }
     event.cancel();

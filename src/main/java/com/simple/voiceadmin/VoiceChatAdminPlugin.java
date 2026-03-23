@@ -42,7 +42,11 @@ public class VoiceChatAdminPlugin extends JavaPlugin {
   public void reloadVoiceAdmin() {
     reloadConfig();
     loadLocales();
-    setupAdminModule();
+    if (adminModule == null) {
+      setupAdminModule();
+    } else {
+      adminModule.reload();
+    }
   }
 
   public boolean hasLocale(String localeKey) {

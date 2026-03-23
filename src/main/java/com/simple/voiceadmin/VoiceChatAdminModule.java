@@ -88,17 +88,35 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
 
   public void shutdown() {
     stopMaintenanceTask();
-    if (service != null) {
-      unregisterPlugins();
-    }
     clearPermissionMutes();
-    service = null;
-    apiPlugin = null;
-    broadcastPlugin = null;
-    mutePlugin = null;
-    muteStore = null;
-    registered = false;
-    apiRetryQueued = false;
+    clearRuntimeState();
+    if (storage != null) {
+      storage.shutdown();
+      storage = null;
+    }
+  }
+
+  public void reload() {
+    stopMaintenanceTask();
+    clearPermissionMutes();
+    clearRuntimeState();
+    if (storage != null) {
+      storage.shutdown();
+      storage = null;
+    }
+    if (!plugin.getConfig().getBoolean(BASE_PATH + ".enabled", true)) {
+      return;
+    }
+    initializeStorage();
+    if (registered) {
+      syncOnlineMuteState();
+    } else {
+      ensureServiceLoaded();
+    }
+    startMaintenanceTask();
+  }
+
+  private void clearRuntimeState() {
     actionHistory.clear();
     voiceNotes.clear();
     voiceWarnings.clear();
@@ -110,10 +128,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     activeListenSessions.clear();
     activeSpySessions.clear();
     activeFollowSessions.clear();
-    if (storage != null) {
-      storage.shutdown();
-    }
-    storage = null;
+    apiRetryQueued = false;
   }
 
   @Override
@@ -1748,35 +1763,35 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return;
     }
     apiPlugin = new VoiceChatApiPlugin(plugin);
-    broadcastPlugin = new BroadcastVoicechatPlugin(plugin, getBroadcastPermission(), getBroadcastGroupName());
-    muteStore = new VoiceChatMuteStore();
+    broadcastPlugin = new BroadcastVoicechatPlugin(plugin);
+    ensureMuteStore();
     mutePlugin = new MuteVoicechatPlugin(plugin, muteStore);
     service.registerPlugin((VoicechatPlugin) apiPlugin);
     service.registerPlugin((VoicechatPlugin) broadcastPlugin);
     service.registerPlugin((VoicechatPlugin) mutePlugin);
     registered = true;
+    syncOnlineMuteState();
     plugin.getLogger().info("VoiceChat admin module enabled.");
-  }
-
-  private void unregisterPlugins() {
-    if (!registered) {
-      return;
-    }
-    if (mutePlugin != null) {
-      plugin.getServer().getServicesManager().unregister(mutePlugin);
-    }
-    if (broadcastPlugin != null) {
-      plugin.getServer().getServicesManager().unregister(broadcastPlugin);
-    }
-    if (apiPlugin != null) {
-      plugin.getServer().getServicesManager().unregister(apiPlugin);
-    }
-    registered = false;
   }
 
   private void ensureMuteStore() {
     if (muteStore == null) {
       muteStore = new VoiceChatMuteStore();
+    }
+  }
+
+  private void syncOnlineMuteState() {
+    if (muteStore == null) {
+      return;
+    }
+    for (Player onlinePlayer : Bukkit.getOnlinePlayers()) {
+      boolean muted = muteStore.isMuted(onlinePlayer.getUniqueId());
+      if (muted) {
+        applyPermissionMute(onlinePlayer);
+      } else {
+        clearPermissionMute(onlinePlayer);
+      }
+      applyMuteState(onlinePlayer, muted);
     }
   }
 
