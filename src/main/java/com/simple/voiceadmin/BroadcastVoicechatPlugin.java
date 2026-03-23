@@ -63,7 +63,8 @@ public class BroadcastVoicechatPlugin implements VoicechatPlugin {
       if (connection == null) {
         continue;
       }
-      api.sendStaticSoundPacketTo(connection, ((MicrophonePacket) event.getPacket()).toStaticSoundPacket());
+      api.sendStaticSoundPacketTo(connection,
+          ((MicrophonePacket) event.getPacket()).staticSoundPacketBuilder().build());
     }
   }
 }

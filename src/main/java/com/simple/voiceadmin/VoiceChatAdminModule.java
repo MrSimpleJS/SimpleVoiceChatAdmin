@@ -10,7 +10,7 @@ import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -29,7 +29,6 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -47,7 +46,6 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   private static final String BASE_PATH = "voicechat-admin";
   private static final int MAX_HISTORY_PER_PLAYER = 15;
   private static final String LOCALIZATION_PATH = BASE_PATH + ".localization";
-  private static final String LOCALES_PATH = BASE_PATH + ".locales";
   private final VoiceChatAdminPlugin plugin;
   private final AtomicLong auditSequence = new AtomicLong();
   private final Map<UUID, Deque<VoiceActionRecord>> actionHistory = new HashMap<>();
@@ -1050,7 +1048,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       String line = record.id() + " | " + formatTimestamp(record.createdAtMs()) + " | "
           + record.action() + " | " + record.actor() + " | "
           + (record.details().isBlank() ? "-" : record.details());
-      sender.sendMessage(ChatColor.GRAY + line);
+      sender.sendMessage(color("&7" + line));
       export.append(line).append('\n');
     }
     sendExportWebhook("export", sender, target, export.toString().trim());
@@ -2515,7 +2513,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     String payload = buildWebhookPayload(username, avatarUrl, content, embed, title, description, color, footer);
     Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
       try {
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json");
@@ -2914,7 +2912,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       }
     }
     if (shouldUsePlayerLocale() && sender instanceof Player player) {
-      String matched = matchConfiguredLocale(player.getLocale());
+      String matched = matchConfiguredLocale(player.locale().toString());
       if (matched != null) {
         return matched;
       }
@@ -2931,7 +2929,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return matchConfiguredLocale(preferred);
     }
     if (shouldUsePlayerLocale() && player.isOnline() && player.getPlayer() != null) {
-      return matchConfiguredLocale(player.getPlayer().getLocale());
+      return matchConfiguredLocale(player.getPlayer().locale().toString());
     }
     return matchConfiguredLocale(getDefaultLocale());
   }
@@ -2983,7 +2981,23 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   }
 
   private String color(String input) {
-    return ChatColor.translateAlternateColorCodes('&', input == null ? "" : input);
+    if (input == null || input.isEmpty()) {
+      return "";
+    }
+    StringBuilder out = new StringBuilder(input.length());
+    for (int i = 0; i < input.length(); i++) {
+      char current = input.charAt(i);
+      if (current == '&' && i + 1 < input.length()) {
+        char next = Character.toLowerCase(input.charAt(i + 1));
+        if ("0123456789abcdefklmnorx".indexOf(next) >= 0) {
+          out.append('\u00A7').append(next);
+          i++;
+          continue;
+        }
+      }
+      out.append(current);
+    }
+    return out.toString();
   }
 
   private record ParsedMuteInput(boolean valid, long durationMs, String reason) {
