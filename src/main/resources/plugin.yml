@@ -120,6 +120,9 @@ commands:
   vcunspy:
     description: Leave silent spy mode
     usage: /vcunspy
+  vcgui:
+    description: Open a voice admin overview GUI
+    usage: /vcgui <mutes|warnings|notes|groups> [player] [page]
 
 permissions:
   svca.join:
@@ -142,5 +145,7 @@ permissions:
     default: op
   svca.locale:
     default: true
+  svca.gui:
+    default: op
   svca.bypasscooldown:
     default: op

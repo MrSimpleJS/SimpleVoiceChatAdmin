@@ -112,6 +112,7 @@ public class VoiceChatAdminPlugin extends JavaPlugin {
     register("vcunlisten", false);
     register("vcspy", true);
     register("vcunspy", false);
+    register("vcgui", true);
   }
 
   private void register(String name, boolean tabCompleter) {

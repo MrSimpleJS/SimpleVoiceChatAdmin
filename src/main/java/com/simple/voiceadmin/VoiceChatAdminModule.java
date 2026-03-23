@@ -5,6 +5,8 @@ import de.maxhenkel.voicechat.api.Group;
 import de.maxhenkel.voicechat.api.VoicechatConnection;
 import de.maxhenkel.voicechat.api.VoicechatPlugin;
 import de.maxhenkel.voicechat.api.VoicechatServerApi;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
@@ -29,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -38,14 +41,27 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.permissions.PermissionAttachment;
 
 public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompleter {
   private static final String BASE_PATH = "voicechat-admin";
   private static final int MAX_HISTORY_PER_PLAYER = 15;
+  private static final int TEXT_PAGE_SIZE = 8;
+  private static final int GUI_PAGE_SIZE = 45;
   private static final String LOCALIZATION_PATH = BASE_PATH + ".localization";
+  private static final LegacyComponentSerializer LEGACY_SERIALIZER =
+      LegacyComponentSerializer.legacySection();
   private final VoiceChatAdminPlugin plugin;
   private final AtomicLong auditSequence = new AtomicLong();
   private final Map<UUID, Deque<VoiceActionRecord>> actionHistory = new HashMap<>();
@@ -70,12 +86,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   private boolean registered;
   private boolean apiRetryQueued;
   private int maintenanceTaskId = -1;
+  private int serviceRetryTaskId = -1;
+  private boolean serviceMissingWarningShown;
 
   public VoiceChatAdminModule(VoiceChatAdminPlugin plugin) {
     this.plugin = plugin;
   }
 
   public void enable() {
+    logConfigValidationIssues();
     if (!plugin.getConfig().getBoolean(BASE_PATH + ".enabled", true)) {
       return;
     }
@@ -86,6 +105,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
 
   public void shutdown() {
     stopMaintenanceTask();
+    stopVoicechatRetryTask();
     clearPermissionMutes();
     clearRuntimeState();
     if (storage != null) {
@@ -96,12 +116,14 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
 
   public void reload() {
     stopMaintenanceTask();
+    stopVoicechatRetryTask();
     clearPermissionMutes();
     clearRuntimeState();
     if (storage != null) {
       storage.shutdown();
       storage = null;
     }
+    logConfigValidationIssues();
     if (!plugin.getConfig().getBoolean(BASE_PATH + ".enabled", true)) {
       return;
     }
@@ -126,7 +148,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     activeListenSessions.clear();
     activeSpySessions.clear();
     activeFollowSessions.clear();
+    auditSequence.set(0L);
     apiRetryQueued = false;
+    serviceMissingWarningShown = false;
   }
 
   @Override
@@ -159,7 +183,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         return handleMoveCommand(sender, args);
       }
       if (name.equals("vcmutelist")) {
-        return handleMuteListCommand(sender);
+        return handleMuteListCommand(sender, args);
       }
       if (name.equals("vclocale")) {
         return handleLocaleCommand(sender, args);
@@ -245,6 +269,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       if (name.equals("vcunspy")) {
         return handleUnspyCommand(sender);
       }
+      if (name.equals("vcgui")) {
+        return handleGuiCommand(sender, args);
+      }
       return handleJoinCommand(sender, args);
     } finally {
       localeContext.remove();
@@ -276,6 +303,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     if (name.equals("vcwebhook") && args.length == 1) {
       return filterByPrefix(List.of("test"), args[0]);
+    }
+    if (name.equals("vcgui")) {
+      if (args.length == 1) {
+        return filterByPrefix(List.of("mutes", "warnings", "notes", "groups"), args[0]);
+      }
+      if ((args[0].equalsIgnoreCase("warnings") || args[0].equalsIgnoreCase("notes")) && args.length == 2) {
+        return filterByPrefix(getKnownPlayerNames(), args[1]);
+      }
+      return Collections.emptyList();
     }
     if (name.equals("vclocale") && args.length == 1) {
       List<String> locales = new ArrayList<>(plugin.getAvailableLocales());
@@ -668,7 +704,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return true;
   }
 
-  private boolean handleMuteListCommand(CommandSender sender) {
+  private boolean handleMuteListCommand(CommandSender sender, String[] args) {
     ensureServiceLoaded();
     if (!sender.hasPermission(getMutePermission())) {
       sender.sendMessage(msg("messages.no-permission", "&cKeine Rechte."));
@@ -683,8 +719,11 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     List<VoiceChatMuteStore.MuteEntry> entries = new ArrayList<>(activeMutes.values());
     entries.sort(Comparator.comparingLong(VoiceChatMuteStore.MuteEntry::getCreatedAtMs).reversed());
+    int page = parsePositiveInt(getArgOrNull(args, 0), 1);
     String lineFormat = msg("messages.mutelist-line", "&e- %player% &7| %remaining% &7| %moderator% &7| %reason%");
-    for (VoiceChatMuteStore.MuteEntry entry : entries) {
+    int maxPage = sendPageHeader(sender, page, entries.size(), "messages.page-info", "&7Page %page%/%pages% (%count% entries)");
+    page = clampPage(page, maxPage);
+    for (VoiceChatMuteStore.MuteEntry entry : paginate(entries, page, TEXT_PAGE_SIZE)) {
       OfflinePlayer player = Bukkit.getOfflinePlayer(entry.getPlayerUuid());
       sender.sendMessage(lineFormat
           .replace("%player%", playerName(player, entry.getPlayerUuid().toString()))
@@ -867,6 +906,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return true;
     }
     Deque<VoiceActionRecord> records = actionHistory.get(target.getUniqueId());
+    int page = parsePositiveInt(getArgOrNull(args, 1), 1);
     sender.sendMessage(msg("messages.history-header", "&6VoiceChat-Historie fuer &e%player%")
         .replace("%player%", playerName(target, args[0])));
     if (records == null || records.isEmpty()) {
@@ -874,7 +914,9 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return true;
     }
     String lineFormat = msg("messages.history-line", "&e%id% &7| &8%time% &7| %action% &7| %actor% &7| %details%");
-    for (VoiceActionRecord record : records) {
+    int maxPage = sendPageHeader(sender, page, records.size(), "messages.page-info", "&7Page %page%/%pages% (%count% entries)");
+    page = clampPage(page, maxPage);
+    for (VoiceActionRecord record : paginate(new ArrayList<>(records), page, TEXT_PAGE_SIZE)) {
       sender.sendMessage(lineFormat
           .replace("%id%", record.id())
           .replace("%time%", formatTimestamp(record.createdAtMs()))
@@ -932,6 +974,7 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     }
     List<VoiceNote> notes = voiceNotes.computeIfAbsent(target.getUniqueId(), key -> new ArrayList<>());
     if (args.length == 1 || (args.length >= 2 && args[1].equalsIgnoreCase("list"))) {
+      int page = parsePositiveInt(getArgOrNull(args, args.length >= 2 && args[1].equalsIgnoreCase("list") ? 2 : 1), 1);
       sender.sendMessage(msg("messages.notes-header", "&6Voice-Notizen fuer &e%player%")
           .replace("%player%", playerName(target, args[0])));
       if (notes.isEmpty()) {
@@ -939,10 +982,14 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
         return true;
       }
       String lineFormat = msg("messages.notes-line", "&e#%index% &7| &8%time% &7| &b%actor% &7| %text%");
-      for (int i = 0; i < notes.size(); i++) {
-        VoiceNote note = notes.get(i);
+      int maxPage = sendPageHeader(sender, page, notes.size(), "messages.page-info", "&7Page %page%/%pages% (%count% entries)");
+      page = clampPage(page, maxPage);
+      int start = pageStart(page, TEXT_PAGE_SIZE);
+      List<VoiceNote> pageItems = paginate(notes, page, TEXT_PAGE_SIZE);
+      for (int i = 0; i < pageItems.size(); i++) {
+        VoiceNote note = pageItems.get(i);
         sender.sendMessage(lineFormat
-            .replace("%index%", String.valueOf(i + 1))
+            .replace("%index%", String.valueOf(start + i + 1))
             .replace("%time%", formatTimestamp(note.createdAtMs()))
             .replace("%actor%", note.actor())
             .replace("%text%", note.text()));
@@ -987,6 +1034,47 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       }
     }
     sender.sendMessage(msg("messages.notes-usage", "&cBenutzung: /vcnotes <spieler> [add|remove|list] [text/index]"));
+    return true;
+  }
+
+  private boolean handleGuiCommand(CommandSender sender, String[] args) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(msg("messages.only-player", "&cPlayers only."));
+      return true;
+    }
+    if (!sender.hasPermission(getGuiPermission())) {
+      sender.sendMessage(msg("messages.no-permission", "&cNo permission."));
+      return true;
+    }
+    if (args.length == 0) {
+      sender.sendMessage(msg("messages.gui-usage", "&cUsage: /vcgui <mutes|warnings|notes|groups> [player] [page]"));
+      return true;
+    }
+    String view = args[0].toLowerCase(Locale.ROOT);
+    if (view.equals("mutes")) {
+      openAdminGui(player, AdminGuiType.MUTES, null, parsePositiveInt(getArgOrNull(args, 1), 1));
+      return true;
+    }
+    if (view.equals("groups")) {
+      openAdminGui(player, AdminGuiType.GROUPS, null, parsePositiveInt(getArgOrNull(args, 1), 1));
+      return true;
+    }
+    if (view.equals("warnings") || view.equals("notes")) {
+      if (args.length < 2) {
+        sender.sendMessage(msg("messages.gui-player-required", "&cPlease specify a player for this GUI."));
+        return true;
+      }
+      OfflinePlayer target = findOfflinePlayer(args[1]);
+      if (target == null) {
+        sender.sendMessage(msg("messages.player-not-found", "&cPlayer not found."));
+        return true;
+      }
+      int page = parsePositiveInt(getArgOrNull(args, 2), 1);
+      openAdminGui(player, view.equals("warnings") ? AdminGuiType.WARNINGS : AdminGuiType.NOTES,
+          target.getUniqueId(), page);
+      return true;
+    }
+    sender.sendMessage(msg("messages.gui-usage", "&cUsage: /vcgui <mutes|warnings|notes|groups> [player] [page]"));
     return true;
   }
 
@@ -1586,9 +1674,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       sender.sendMessage(msg("messages.no-permission", "&cKeine Rechte."));
       return true;
     }
-    sender.sendMessage(msg("messages.reload-success", "&aVoiceChat admin module reloaded."));
-    sendAuditLog(recordAction(null, "reload", sender.getName(), ""), "reload", sender, null, "");
     plugin.reloadVoiceAdmin();
+    int issues = validateConfiguration().size();
+    sender.sendMessage(msg("messages.reload-success", "&aVoiceChat admin module reloaded."));
+    if (issues > 0) {
+      sender.sendMessage(msg("messages.reload-warning", "&eReload completed with %count% config warnings. Check console.")
+          .replace("%count%", String.valueOf(issues)));
+    }
+    sendAuditLog(recordAction(null, "reload", sender.getName(), "warnings=" + issues), "reload", sender, null,
+        "warnings=" + issues);
     return true;
   }
 
@@ -1718,6 +1812,209 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return true;
   }
 
+  @EventHandler
+  public void onInventoryClick(InventoryClickEvent event) {
+    if (!(event.getInventory().getHolder() instanceof AdminGuiHolder holder)) {
+      return;
+    }
+    event.setCancelled(true);
+    if (!(event.getWhoClicked() instanceof Player player)) {
+      return;
+    }
+    if (event.getClickedInventory() == null || !event.getClickedInventory().equals(event.getInventory())) {
+      return;
+    }
+    if (event.getRawSlot() == 45 && holder.page() > 1) {
+      openAdminGui(player, holder.type(), holder.targetUuid(), holder.page() - 1);
+      return;
+    }
+    if (event.getRawSlot() == 53 && holder.page() < holder.maxPage()) {
+      openAdminGui(player, holder.type(), holder.targetUuid(), holder.page() + 1);
+    }
+  }
+
+  @EventHandler
+  public void onInventoryDrag(InventoryDragEvent event) {
+    if (event.getInventory().getHolder() instanceof AdminGuiHolder) {
+      event.setCancelled(true);
+    }
+  }
+
+  @EventHandler
+  public void onInventoryClose(InventoryCloseEvent event) {
+    if (event.getInventory().getHolder() instanceof AdminGuiHolder) {
+      event.getInventory().clear();
+    }
+  }
+
+  private void openAdminGui(Player player, AdminGuiType type, UUID targetUuid, int requestedPage) {
+    List<ItemStack> entries = switch (type) {
+      case MUTES -> buildMuteGuiEntries();
+      case GROUPS -> buildGroupGuiEntries();
+      case WARNINGS -> buildWarningGuiEntries(targetUuid);
+      case NOTES -> buildNoteGuiEntries(targetUuid);
+    };
+    int maxPage = Math.max(1, (entries.size() + GUI_PAGE_SIZE - 1) / GUI_PAGE_SIZE);
+    int page = clampPage(requestedPage, maxPage);
+    Component title = guiTitle(type, targetUuid, page, maxPage);
+    AdminGuiHolder holder = new AdminGuiHolder(type, targetUuid, page, maxPage);
+    Inventory inventory = Bukkit.createInventory(holder, 54, title);
+    holder.inventory = inventory;
+    List<ItemStack> pageItems = paginate(entries, page, GUI_PAGE_SIZE);
+    for (int i = 0; i < pageItems.size(); i++) {
+      inventory.setItem(i, pageItems.get(i));
+    }
+    inventory.setItem(45, createGuiButton(Material.PAPER,
+        msg("messages.gui-prev", "&ePrevious page"), List.of(msg("messages.page-jump", "&7Open page %page%")
+            .replace("%page%", String.valueOf(Math.max(1, page - 1))))));
+    inventory.setItem(49, createGuiButton(Material.BOOK,
+        msg("messages.gui-summary", "&6Overview"),
+        List.of(msg("messages.page-info", "&7Page %page%/%pages% (%count% entries)")
+            .replace("%page%", String.valueOf(page))
+            .replace("%pages%", String.valueOf(maxPage))
+            .replace("%count%", String.valueOf(entries.size())))));
+    inventory.setItem(53, createGuiButton(Material.PAPER,
+        msg("messages.gui-next", "&eNext page"), List.of(msg("messages.page-jump", "&7Open page %page%")
+            .replace("%page%", String.valueOf(Math.min(maxPage, page + 1))))));
+    player.openInventory(inventory);
+  }
+
+  private List<ItemStack> buildMuteGuiEntries() {
+    ensureMuteStore();
+    List<VoiceChatMuteStore.MuteEntry> entries = new ArrayList<>(muteStore.getActiveMutes().values());
+    entries.sort(Comparator.comparingLong(VoiceChatMuteStore.MuteEntry::getCreatedAtMs).reversed());
+    List<ItemStack> items = new ArrayList<>();
+    for (VoiceChatMuteStore.MuteEntry entry : entries) {
+      OfflinePlayer target = Bukkit.getOfflinePlayer(entry.getPlayerUuid());
+      items.add(createPlayerItem(target, Material.BARRIER,
+          color("&c" + playerName(target, entry.getPlayerUuid().toString())),
+          List.of(
+              color("&7Remaining: &f" + formatRemainingMute(muteStore.getRemainingMs(entry.getPlayerUuid()))),
+              color("&7Moderator: &f" + blankFallback(entry.getModerator(), msg("messages.unknown-value", "&7Unknown"))),
+              color("&7Reason: &f" + blankFallback(entry.getReason(), msg("messages.no-reason", "&7No reason")))
+          )));
+    }
+    if (items.isEmpty()) {
+      items.add(createGuiButton(Material.BARRIER, msg("messages.mutelist-empty", "&7No active voice mutes."),
+          Collections.emptyList()));
+    }
+    return items;
+  }
+
+  private List<ItemStack> buildWarningGuiEntries(UUID targetUuid) {
+    List<VoiceWarning> warnings = targetUuid == null
+        ? Collections.emptyList()
+        : voiceWarnings.getOrDefault(targetUuid, Collections.emptyList());
+    List<ItemStack> items = new ArrayList<>();
+    OfflinePlayer target = targetUuid == null ? null : Bukkit.getOfflinePlayer(targetUuid);
+    for (int i = warnings.size() - 1; i >= 0; i--) {
+      VoiceWarning warning = warnings.get(i);
+      items.add(createPlayerItem(target, Material.NOTE_BLOCK,
+          color("&6Warning #" + (i + 1)),
+          List.of(
+              color("&7Player: &f" + playerName(target, targetUuid == null ? "Unknown" : targetUuid.toString())),
+              color("&7Time: &f" + formatTimestamp(warning.createdAtMs())),
+              color("&7Actor: &f" + warning.actor()),
+              color("&7Reason: &f" + warning.reason())
+          )));
+    }
+    if (items.isEmpty()) {
+      items.add(createGuiButton(Material.BARRIER, msg("messages.gui-empty", "&7No entries available."),
+          Collections.emptyList()));
+    }
+    return items;
+  }
+
+  private List<ItemStack> buildNoteGuiEntries(UUID targetUuid) {
+    List<VoiceNote> notes = targetUuid == null
+        ? Collections.emptyList()
+        : voiceNotes.getOrDefault(targetUuid, Collections.emptyList());
+    List<ItemStack> items = new ArrayList<>();
+    OfflinePlayer target = targetUuid == null ? null : Bukkit.getOfflinePlayer(targetUuid);
+    for (int i = notes.size() - 1; i >= 0; i--) {
+      VoiceNote note = notes.get(i);
+      items.add(createPlayerItem(target, Material.PAPER,
+          color("&eNote #" + (i + 1)),
+          List.of(
+              color("&7Player: &f" + playerName(target, targetUuid == null ? "Unknown" : targetUuid.toString())),
+              color("&7Time: &f" + formatTimestamp(note.createdAtMs())),
+              color("&7Actor: &f" + note.actor()),
+              color("&7Text: &f" + note.text())
+          )));
+    }
+    if (items.isEmpty()) {
+      items.add(createGuiButton(Material.BARRIER, msg("messages.gui-empty", "&7No entries available."),
+          Collections.emptyList()));
+    }
+    return items;
+  }
+
+  private List<ItemStack> buildGroupGuiEntries() {
+    List<GroupView> groups = collectGroupViews();
+    List<ItemStack> items = new ArrayList<>();
+    for (GroupView group : groups) {
+      items.add(createGuiButton(Material.CHEST,
+          color("&b" + group.name()),
+          List.of(
+              color("&7Players: &f" + group.playerCount()),
+              color("&7Locked: " + (group.locked() ? "&aYes" : "&cNo")),
+              color("&7Temporary: " + (group.temporary() ? "&aYes" : "&cNo")),
+              color("&7Members: &f" + (group.playerNames().isEmpty() ? "-" : String.join(", ", group.playerNames())))
+          )));
+    }
+    if (items.isEmpty()) {
+      items.add(createGuiButton(Material.BARRIER, msg("messages.list-empty", "&7No active voice chat groups found."),
+          Collections.emptyList()));
+    }
+    return items;
+  }
+
+  private ItemStack createPlayerItem(OfflinePlayer player, Material fallback, String title, List<String> lore) {
+    if (player != null && player.getName() != null) {
+      ItemStack skull = new ItemStack(Material.PLAYER_HEAD);
+      ItemMeta meta = skull.getItemMeta();
+      if (meta instanceof SkullMeta skullMeta) {
+        skullMeta.setOwningPlayer(player);
+        applyMeta(skullMeta, title, lore);
+        skull.setItemMeta(skullMeta);
+        return skull;
+      }
+    }
+    return createGuiButton(fallback, title, lore);
+  }
+
+  private ItemStack createGuiButton(Material material, String title, List<String> lore) {
+    ItemStack item = new ItemStack(material);
+    ItemMeta meta = item.getItemMeta();
+    if (meta != null) {
+      applyMeta(meta, title, lore);
+      item.setItemMeta(meta);
+    }
+    return item;
+  }
+
+  private void applyMeta(ItemMeta meta, String title, List<String> lore) {
+    meta.displayName(legacyComponent(title));
+    if (lore != null && !lore.isEmpty()) {
+      List<Component> colored = new ArrayList<>();
+      for (String line : lore) {
+        colored.add(legacyComponent(line));
+      }
+      meta.lore(colored);
+    }
+    meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+  }
+
+  private Component guiTitle(AdminGuiType type, UUID targetUuid, int page, int maxPage) {
+    String subject = targetUuid == null ? "" : " | " + playerName(Bukkit.getOfflinePlayer(targetUuid), targetUuid.toString());
+    return legacyComponent(switch (type) {
+      case MUTES -> color("&8Voice Mutes &7[" + page + "/" + maxPage + "]");
+      case GROUPS -> color("&8Voice Groups &7[" + page + "/" + maxPage + "]");
+      case WARNINGS -> color("&8Warnings" + subject + " &7[" + page + "/" + maxPage + "]");
+      case NOTES -> color("&8Notes" + subject + " &7[" + page + "/" + maxPage + "]");
+    });
+  }
+
   private VoicechatServerApi getVoicechatApi() {
     return apiPlugin == null ? null : apiPlugin.getVoicechatApi();
   }
@@ -1729,6 +2026,10 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       return api;
     }
     ensureServiceLoaded();
+    if (service == null) {
+      sender.sendMessage(msg("messages.api-not-available", "&cVoice chat API is not available."));
+      return null;
+    }
     api = getVoicechatApi();
     if (api != null) {
       apiRetryQueued = false;
@@ -1758,8 +2059,14 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
       service = plugin.getServer().getServicesManager().load(BukkitVoicechatService.class);
     }
     if (service == null) {
+      if (!serviceMissingWarningShown) {
+        plugin.getLogger().warning("Simple Voice Chat service not found. Voice features will retry in the background.");
+        serviceMissingWarningShown = true;
+      }
+      queueVoicechatServiceRetry();
       return;
     }
+    stopVoicechatRetryTask();
     apiPlugin = new VoiceChatApiPlugin(plugin);
     broadcastPlugin = new BroadcastVoicechatPlugin(plugin);
     ensureMuteStore();
@@ -1770,6 +2077,38 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     registered = true;
     syncOnlineMuteState();
     plugin.getLogger().info("VoiceChat admin module enabled.");
+  }
+
+  private void queueVoicechatServiceRetry() {
+    if (serviceRetryTaskId != -1) {
+      return;
+    }
+    final int[] attempts = {0};
+    serviceRetryTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, () -> {
+      attempts[0]++;
+      if (registered) {
+        stopVoicechatRetryTask();
+        return;
+      }
+      service = plugin.getServer().getServicesManager().load(BukkitVoicechatService.class);
+      if (service != null) {
+        serviceMissingWarningShown = false;
+        stopVoicechatRetryTask();
+        ensureServiceLoaded();
+        return;
+      }
+      if (attempts[0] >= 15) {
+        plugin.getLogger().warning("Simple Voice Chat service is still unavailable after multiple retries.");
+        stopVoicechatRetryTask();
+      }
+    }, 40L, 40L);
+  }
+
+  private void stopVoicechatRetryTask() {
+    if (serviceRetryTaskId != -1) {
+      Bukkit.getScheduler().cancelTask(serviceRetryTaskId);
+      serviceRetryTaskId = -1;
+    }
   }
 
   private void ensureMuteStore() {
@@ -1796,7 +2135,15 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   private void initializeStorage() {
     ensureMuteStore();
     storage = new VoiceChatStorage(plugin);
-    storage.initialize();
+    if (!storage.initialize()) {
+      plugin.getLogger().warning("VoiceChat storage unavailable. Continuing with in-memory state only.");
+      String detail = storage.getLastError();
+      if (detail != null && !detail.isBlank()) {
+        plugin.getLogger().warning("Storage detail: " + detail);
+      }
+      storage = null;
+      return;
+    }
     auditSequence.set(storage.loadAuditSequence());
     muteStore.replaceAll(storage.loadMutes());
     loadStoredHistory();
@@ -1805,6 +2152,53 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     loadStoredGroupStates();
     localePreferences.clear();
     localePreferences.putAll(storage.loadLocalePreferences());
+  }
+
+  private void logConfigValidationIssues() {
+    for (String issue : validateConfiguration()) {
+      plugin.getLogger().warning("Config validation: " + issue);
+    }
+  }
+
+  private List<String> validateConfiguration() {
+    List<String> issues = new ArrayList<>();
+    if (plugin.getConfig().getLong(BASE_PATH + ".cooldown-ms", 1500L) < 0L) {
+      issues.add("cooldown-ms should be >= 0.");
+    }
+    if (plugin.getConfig().getLong(BASE_PATH + ".confirm-window-ms", 7000L) < 1000L) {
+      issues.add("confirm-window-ms should be at least 1000.");
+    }
+    if (plugin.getConfig().getLong(BASE_PATH + ".maintenance.interval-ticks", 100L) < 20L) {
+      issues.add("maintenance.interval-ticks should be at least 20.");
+    }
+    if (plugin.getConfig().getLong(BASE_PATH + ".auto-unmute.check-interval-ticks", 300L) < 20L) {
+      issues.add("auto-unmute.check-interval-ticks should be at least 20.");
+    }
+    String storageFile = plugin.getConfig().getString(BASE_PATH + ".storage.file", "voicechat-admin.db");
+    if (storageFile == null || storageFile.isBlank()) {
+      issues.add("storage.file is blank; defaulting to voicechat-admin.db is recommended.");
+    }
+    if (plugin.getConfig().getBoolean(BASE_PATH + ".audit-webhook.enabled", false)) {
+      String url = plugin.getConfig().getString(BASE_PATH + ".audit-webhook.url", "");
+      if (url == null || url.isBlank()) {
+        issues.add("audit-webhook is enabled but url is empty.");
+      } else {
+        try {
+          URI.create(url);
+        } catch (Exception ex) {
+          issues.add("audit-webhook.url is invalid: " + ex.getMessage());
+        }
+      }
+    }
+    String defaultLocale = matchConfiguredLocale(getDefaultLocale());
+    if (!plugin.hasLocale(defaultLocale)) {
+      issues.add("default locale '" + getDefaultLocale() + "' is not present in the locale folder.");
+    }
+    String fallbackLocale = matchConfiguredLocale(getFallbackLocale());
+    if (!plugin.hasLocale(fallbackLocale)) {
+      issues.add("fallback locale '" + getFallbackLocale() + "' is not present in the locale folder.");
+    }
+    return issues;
   }
 
   private void loadStoredHistory() {
@@ -2002,6 +2396,10 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
 
   private String getInfoPermission() {
     return plugin.getConfig().getString(BASE_PATH + ".permissions.info", getMutePermission());
+  }
+
+  private String getGuiPermission() {
+    return plugin.getConfig().getString(BASE_PATH + ".permissions.gui", getInfoPermission());
   }
 
   private String getKickPermission() {
@@ -2844,6 +3242,85 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return matches;
   }
 
+  private <T> List<T> paginate(List<T> values, int page, int pageSize) {
+    if (values == null || values.isEmpty()) {
+      return Collections.emptyList();
+    }
+    int start = pageStart(page, pageSize);
+    if (start >= values.size()) {
+      return Collections.emptyList();
+    }
+    int end = Math.min(values.size(), start + Math.max(1, pageSize));
+    return new ArrayList<>(values.subList(start, end));
+  }
+
+  private int pageStart(int page, int pageSize) {
+    return Math.max(0, (Math.max(1, page) - 1) * Math.max(1, pageSize));
+  }
+
+  private int clampPage(int page, int maxPage) {
+    return Math.min(Math.max(1, page), Math.max(1, maxPage));
+  }
+
+  private int sendPageHeader(CommandSender sender, int requestedPage, int totalEntries, String path, String fallback) {
+    int maxPage = Math.max(1, (totalEntries + TEXT_PAGE_SIZE - 1) / TEXT_PAGE_SIZE);
+    int page = clampPage(requestedPage, maxPage);
+    sender.sendMessage(msg(path, fallback)
+        .replace("%page%", String.valueOf(page))
+        .replace("%pages%", String.valueOf(maxPage))
+        .replace("%count%", String.valueOf(totalEntries)));
+    return maxPage;
+  }
+
+  private int parsePositiveInt(String raw, int fallback) {
+    if (raw == null || raw.isBlank()) {
+      return fallback;
+    }
+    try {
+      int value = Integer.parseInt(raw.trim());
+      return value <= 0 ? fallback : value;
+    } catch (NumberFormatException ignored) {
+      return fallback;
+    }
+  }
+
+  private String getArgOrNull(String[] args, int index) {
+    if (args == null || index < 0 || index >= args.length) {
+      return null;
+    }
+    return args[index];
+  }
+
+  private String blankFallback(String value, String fallback) {
+    return value == null || value.isBlank() ? color(fallback) : value;
+  }
+
+  private List<GroupView> collectGroupViews() {
+    Map<String, List<String>> playersByGroup = new HashMap<>();
+    VoicechatServerApi api = getVoicechatApi();
+    if (api != null) {
+      for (Player online : Bukkit.getOnlinePlayers()) {
+        VoicechatConnection connection = api.getConnectionOf(online.getUniqueId());
+        if (connection == null || connection.getGroup() == null) {
+          continue;
+        }
+        String name = safeGroupName(connection.getGroup());
+        playersByGroup.computeIfAbsent(name, key -> new ArrayList<>()).add(online.getName());
+      }
+    }
+    Set<String> allGroups = new HashSet<>(getKnownGroupNames());
+    allGroups.addAll(playersByGroup.keySet());
+    List<GroupView> groups = new ArrayList<>();
+    for (String groupName : allGroups) {
+      List<String> playerNames = new ArrayList<>(playersByGroup.getOrDefault(groupName, Collections.emptyList()));
+      playerNames.sort(String.CASE_INSENSITIVE_ORDER);
+      groups.add(new GroupView(groupName, playerNames.size(), isGroupLocked(groupName),
+          temporaryGroups.contains(groupName), playerNames));
+    }
+    groups.sort(Comparator.comparing(GroupView::name, String.CASE_INSENSITIVE_ORDER));
+    return groups;
+  }
+
   private String formatTimestamp(long timestampMs) {
     return DateTimeFormatter.ofPattern("dd.MM HH:mm").format(
         ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(timestampMs), java.time.ZoneId.systemDefault()));
@@ -3000,6 +3477,10 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
     return out.toString();
   }
 
+  private Component legacyComponent(String input) {
+    return LEGACY_SERIALIZER.deserialize(color(input));
+  }
+
   private record ParsedMuteInput(boolean valid, long durationMs, String reason) {
   }
 
@@ -3010,5 +3491,51 @@ public class VoiceChatAdminModule implements CommandExecutor, Listener, TabCompl
   }
 
   private record VoiceWarning(long createdAtMs, String actor, String reason) {
+  }
+
+  private enum AdminGuiType {
+    MUTES,
+    WARNINGS,
+    NOTES,
+    GROUPS
+  }
+
+  private record GroupView(String name, int playerCount, boolean locked, boolean temporary, List<String> playerNames) {
+  }
+
+  private static class AdminGuiHolder implements InventoryHolder {
+    private final AdminGuiType type;
+    private final UUID targetUuid;
+    private final int page;
+    private final int maxPage;
+    private Inventory inventory;
+
+    private AdminGuiHolder(AdminGuiType type, UUID targetUuid, int page, int maxPage) {
+      this.type = type;
+      this.targetUuid = targetUuid;
+      this.page = page;
+      this.maxPage = maxPage;
+    }
+
+    @Override
+    public Inventory getInventory() {
+      return inventory;
+    }
+
+    public AdminGuiType type() {
+      return type;
+    }
+
+    public UUID targetUuid() {
+      return targetUuid;
+    }
+
+    public int page() {
+      return page;
+    }
+
+    public int maxPage() {
+      return maxPage;
+    }
   }
 }

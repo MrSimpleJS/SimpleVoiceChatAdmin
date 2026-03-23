@@ -12,6 +12,7 @@ voicechat-admin:
     move: svca.move
     listen: svca.listen
     spy: svca.spy
+    gui: svca.gui
   broadcast:
     group-name: broadcast
     password: server-ip
@@ -91,6 +92,8 @@ voicechat-admin:
     webhook-usage: '&cUsage: /vcwebhook test'
     listen-usage: '&cUsage: /vclisten <group>'
     spy-usage: '&cUsage: /vcspy <group>'
+    gui-usage: '&cUsage: /vcgui <mutes|warnings|notes|groups> [player] [page]'
+    gui-player-required: '&cPlease specify a player for this GUI.'
     player-not-found: '&cPlayer not found.'
     player-not-connected: '&ePlayer is not connected to voice chat.'
     player-offline: '&ePlayer is offline. The mute will apply on join.'
@@ -128,6 +131,7 @@ voicechat-admin:
     unfollow-empty: '&eYou are not currently following anyone.'
     forceleave-success: '&aRemoved %count% players from %group%.'
     reload-success: '&aReloaded the voice admin plugin.'
+    reload-warning: '&eReload completed with %count% config warnings. Check console.'
     muted-you: '&cYou have been muted in voice chat.'
     unmuted-you: '&aYou have been unmuted in voice chat.'
     kicked-you: '&cYou were removed from your voice chat group.'
@@ -165,6 +169,8 @@ voicechat-admin:
     search-note-line: '&e[Note] &b%player% &7| &8%time% &7| %text%'
     search-history-line: '&e[History] &b%player% &7| &8%time% &7| &f%action% &7| %details%'
     search-more: '&7Showing %shown% of %total% matches.'
+    page-info: '&7Page %page%/%pages% (%count% entries)'
+    page-jump: '&7Open page %page%'
     locale-current: '&6Current locale: &e%locale%'
     locale-available: '&7Available: %locales%'
     locale-set: '&aLocale set to %locale%.'
@@ -204,6 +210,10 @@ voicechat-admin:
     spylist-listen-line: '&e[Listen] &b%player% &7-> %group%'
     spylist-spy-line: '&e[Spy] &b%player% &7-> %group%'
     spylist-follow-line: '&e[Follow] &b%player% &7-> %target%'
+    gui-prev: '&ePrevious page'
+    gui-next: '&eNext page'
+    gui-summary: '&6Overview'
+    gui-empty: '&7No entries available.'
     follow-self: '&eYou are already following yourself.'
     state-yes: '&aYes'
     state-no: '&cNo'

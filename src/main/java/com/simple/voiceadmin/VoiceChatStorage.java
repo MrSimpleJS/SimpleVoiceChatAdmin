@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -20,6 +21,8 @@ public class VoiceChatStorage {
   private static final int CURRENT_SCHEMA_VERSION = 2;
   private final VoiceChatAdminPlugin plugin;
   private final File databaseFile;
+  private volatile boolean closed;
+  private volatile String lastError = "";
   private final ExecutorService writeExecutor = Executors.newSingleThreadExecutor(r -> {
     Thread thread = new Thread(r, "SimpleVoiceChatAdmin-SQLite");
     thread.setDaemon(true);
@@ -28,11 +31,12 @@ public class VoiceChatStorage {
 
   public VoiceChatStorage(VoiceChatAdminPlugin plugin) {
     this.plugin = plugin;
-    this.databaseFile = new File(plugin.getDataFolder(),
-        plugin.getConfig().getString("voicechat-admin.storage.file", "voicechat-admin.db"));
+    String configured = plugin.getConfig().getString("voicechat-admin.storage.file", "voicechat-admin.db");
+    String fileName = configured == null || configured.isBlank() ? "voicechat-admin.db" : configured.trim();
+    this.databaseFile = new File(plugin.getDataFolder(), fileName);
   }
 
-  public void initialize() {
+  public boolean initialize() {
     if (!databaseFile.getParentFile().exists()) {
       databaseFile.getParentFile().mkdirs();
     }
@@ -43,12 +47,17 @@ public class VoiceChatStorage {
         migrate(connection, version);
         setSchemaVersion(connection, version);
       }
+      lastError = "";
+      return true;
     } catch (Exception ex) {
+      lastError = ex.getMessage();
       plugin.getLogger().warning("Failed to initialize SQLite storage: " + ex.getMessage());
+      return false;
     }
   }
 
   public void shutdown() {
+    closed = true;
     writeExecutor.shutdown();
     try {
       if (!writeExecutor.awaitTermination(5L, TimeUnit.SECONDS)) {
@@ -75,8 +84,12 @@ public class VoiceChatStorage {
     return 0L;
   }
 
+  public String getLastError() {
+    return lastError;
+  }
+
   public void saveAuditSequence(long value) {
-    executeAsync("save meta value", connection -> {
+    submitWrite("save meta value", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
         statement.setString(1, "audit_sequence");
@@ -111,7 +124,7 @@ public class VoiceChatStorage {
     if (entry == null || entry.getPlayerUuid() == null) {
       return;
     }
-    executeAsync("save mute", connection -> {
+    submitWrite("save mute", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT INTO mutes(player_uuid, created_at, muted_until, moderator, reason) VALUES (?, ?, ?, ?, ?) "
               + "ON CONFLICT(player_uuid) DO UPDATE SET created_at=excluded.created_at, "
@@ -157,7 +170,7 @@ public class VoiceChatStorage {
     if (action == null || action.targetUuid() == null || action.id() == null) {
       return;
     }
-    executeAsync("append history", connection -> {
+    submitWrite("append history", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT OR REPLACE INTO history(log_id, target_uuid, created_at, action, actor, details) "
               + "VALUES (?, ?, ?, ?, ?, ?)")) {
@@ -201,7 +214,7 @@ public class VoiceChatStorage {
     if (playerUuid == null) {
       return;
     }
-    executeAsync("replace notes", connection -> {
+    submitWrite("replace notes", connection -> {
       connection.setAutoCommit(false);
       try (PreparedStatement delete = connection.prepareStatement("DELETE FROM notes WHERE target_uuid = ?");
            PreparedStatement insert = connection.prepareStatement(
@@ -253,7 +266,7 @@ public class VoiceChatStorage {
     if (warning == null || warning.targetUuid() == null) {
       return;
     }
-    executeAsync("append warning", connection -> {
+    submitWrite("append warning", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT INTO warnings(target_uuid, created_at, actor, reason) VALUES (?, ?, ?, ?)")) {
         statement.setString(1, warning.targetUuid().toString());
@@ -288,7 +301,7 @@ public class VoiceChatStorage {
     if (groupName == null || groupName.isBlank()) {
       return;
     }
-    executeAsync("save group state", connection -> {
+    submitWrite("save group state", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT INTO groups(name, temp, locked) VALUES (?, ?, ?) "
               + "ON CONFLICT(name) DO UPDATE SET temp=excluded.temp, locked=excluded.locked")) {
@@ -304,7 +317,7 @@ public class VoiceChatStorage {
     if (groupName == null || groupName.isBlank()) {
       return;
     }
-    executeAsync("delete group state", connection -> {
+    submitWrite("delete group state", connection -> {
       try (PreparedStatement statement = connection.prepareStatement("DELETE FROM groups WHERE name = ?")) {
         statement.setString(1, groupName);
         statement.executeUpdate();
@@ -332,7 +345,7 @@ public class VoiceChatStorage {
     if (playerUuid == null || locale == null || locale.isBlank()) {
       return;
     }
-    executeAsync("save locale preference", connection -> {
+    submitWrite("save locale preference", connection -> {
       try (PreparedStatement statement = connection.prepareStatement(
           "INSERT INTO locale_preferences(player_uuid, locale) VALUES (?, ?) "
               + "ON CONFLICT(player_uuid) DO UPDATE SET locale=excluded.locale")) {
@@ -404,7 +417,7 @@ public class VoiceChatStorage {
     if (playerUuid == null) {
       return;
     }
-    executeAsync(action, connection -> {
+    submitWrite(action, connection -> {
       try (PreparedStatement statement = connection.prepareStatement(sql)) {
         statement.setString(1, playerUuid.toString());
         statement.executeUpdate();
@@ -412,14 +425,27 @@ public class VoiceChatStorage {
     });
   }
 
-  private void executeAsync(String action, SqlTask task) {
-    writeExecutor.execute(() -> {
-      try (Connection connection = openConnection()) {
-        task.run(connection);
-      } catch (Exception ex) {
-        plugin.getLogger().warning("Failed to " + action + ": " + ex.getMessage());
-      }
-    });
+  private void submitWrite(String action, SqlTask task) {
+    if (closed) {
+      return;
+    }
+    try {
+      writeExecutor.execute(() -> {
+        if (closed) {
+          return;
+        }
+        try (Connection connection = openConnection()) {
+          task.run(connection);
+          lastError = "";
+        } catch (Exception ex) {
+          lastError = ex.getMessage();
+          plugin.getLogger().warning("Failed to " + action + ": " + ex.getMessage());
+        }
+      });
+    } catch (RejectedExecutionException ex) {
+      lastError = ex.getMessage();
+      plugin.getLogger().warning("Rejected async storage task for " + action + ": " + ex.getMessage());
+    }
   }
 
   private Connection openConnection() throws Exception {
